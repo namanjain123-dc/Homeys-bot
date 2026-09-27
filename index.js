@@ -1,38 +1,39 @@
-const {
-    Client,
-    GatewayIntentBits
-} = require("discord.js");
-
-const TOKEN = process.env.DISCORD_TOKEN;
-
-const ROLE_NAME = "homeys";
-const COOLDOWN = 60 * 60 * 1000;
-const TIMEOUT_DURATION = 7 * 24 * 60 * 60 * 1000;
+const { Client, GatewayIntentBits } = require("discord.js");
 
 const client = new Client({
-    intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildMembers
-    ]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers
+  ]
 });
 
+// Prevent unhandled errors from crashing the bot
+process.on("unhandledRejection", (error) => console.error("Unhandled Rejection:", error));
+process.on("uncaughtException", (error) => console.error("Uncaught Exception:", error));
+
+const COOLDOWN = 60 * 60 * 1000; // 60 minutes
+const TIMEOUT_DURATION = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+// serverId -> { lastPing: timestamp, violations: Map(userId -> count) }
 const serverData = new Map();
 
-client.once("ready", () => {
-    console.log(`Logged in as ${client.user.tag}`);
+client.on("clientReady", () => {
+  console.log(`Logged in as ${client.user.tag}`);
 });
 
 client.on("messageCreate", async (message) => {
-    if (!message.guild) return;
-    if (message.author.id === client.user.id) return;
+  try {
+    if (!message.guild || message.author.bot) return;
 
+    // Match role 'homeys'
     const role = message.guild.roles.cache.find(
-        r => r.name.toLowerCase() === ROLE_NAME.toLowerCase()
+      (r) => r.name.toLowerCase() === "homeys"
     );
-
     if (!role) return;
+
+    // Check if the message mentions the role
     if (!message.mentions.roles.has(role.id)) return;
 
     const guildId = message.guild.id;
@@ -40,95 +41,66 @@ client.on("messageCreate", async (message) => {
     const now = Date.now();
 
     if (!serverData.has(guildId)) {
-        serverData.set(guildId, {
-            lastPing: null,
-            violations: new Map()
-        });
+      serverData.set(guildId, {
+        lastPing: 0,
+        violations: new Map()
+      });
     }
 
     const data = serverData.get(guildId);
 
-    // First ping, or cooldown has expired
-    if (!data.lastPing || now - data.lastPing >= COOLDOWN) {
-        data.lastPing = now;
-        data.violations.clear();
-
-        console.log(
-            `@${role.name} ping allowed by ${message.author.tag}`
-        );
-
-        return;
+    // First ping / cooldown expired -> allow ping
+    if (now - data.lastPing >= COOLDOWN) {
+      data.lastPing = now;
+      data.violations.clear();
+      console.log(`@${role.name} ping allowed.`);
+      return;
     }
 
-    // Ping attempted during cooldown
-    const violations = (data.violations.get(userId) || 0) + 1;
-    data.violations.set(userId, violations);
-
+    // Pinged within cooldown -> delete message
     try {
-        await message.delete();
-    } catch (error) {
-        console.error("Could not delete message:", error);
+      await message.delete();
+    } catch (err) {
+      console.error("Could not delete message:", err.message);
     }
 
-    // Second violation
-    if (violations >= 2) {
+    // Track user violations
+    const userViolations = (data.violations.get(userId) || 0) + 1;
+    data.violations.set(userId, userViolations);
 
-        // Bot → kick
-        if (message.author.bot) {
-            try {
-                await message.guild.members.kick(
-                    userId,
-                    "Repeatedly pinging @homeys during cooldown"
-                );
+    // Fetch full member object
+    const member = await message.guild.members.fetch(userId).catch(() => null);
 
-                console.log(
-                    `Bot ${message.author.tag} kicked.`
-                );
-            } catch (error) {
-                console.error("Could not kick bot:", error);
-            }
+    if (userViolations === 1) {
+      // 1st violation: warning
+      const remainingMs = COOLDOWN - (now - data.lastPing);
+      const minutes = Math.ceil(remainingMs / 60000);
 
-            return;
-        }
+      const warn = await message.channel.send(
+        `⚠️ <@${userId}>, @${role.name} is on cooldown! You can ping it again in **${minutes}m**. Another attempt will result in a 7-day timeout.`
+      ).catch(() => null);
 
-        // Human → 7 day timeout
-        try {
-            const member = await message.guild.members.fetch(userId);
-
-            if (member.moderatable) {
-                await member.timeout(
-                    TIMEOUT_DURATION,
-                    "Repeatedly pinging @homeys during cooldown"
-                );
-
-                console.log(
-                    `${message.author.tag} timed out for 7 days.`
-                );
-            }
-        } catch (error) {
-            console.error("Could not timeout member:", error);
-        }
-
-        return;
+      if (warn) {
+        setTimeout(() => warn.delete().catch(() => null), 6000);
+      }
+    } else {
+      // 2nd+ violation: timeout or kick
+      if (member && member.moderatable) {
+        await member.timeout(TIMEOUT_DURATION, "Repeated ping during role cooldown").catch(console.error);
+        const banMsg = await message.channel.send(
+          `⛔ <@${userId}> has been timed out for 7 days for pinging @${role.name} repeatedly.`
+        ).catch(() => null);
+        if (banMsg) setTimeout(() => banMsg.delete().catch(() => null), 8000);
+      } else {
+        const warn = await message.channel.send(
+          `⚠️ <@${userId}> cannot be timed out (they outrank the bot or own the server).`
+        ).catch(() => null);
+        if (warn) setTimeout(() => warn.delete().catch(() => null), 6000);
+      }
     }
-
-    // First violation warning
-    const remaining = COOLDOWN - (now - data.lastPing);
-    const minutes = Math.ceil(remaining / 60000);
-
-    try {
-        const warning = await message.channel.send(
-            `${message.author}, **@${role.name}** is on cooldown. ` +
-            `You can ping it again in **${minutes} minute(s)**. ` +
-            `⚠️ Another attempt will result in a **7-day timeout**.`
-        );
-
-        setTimeout(() => {
-            warning.delete().catch(() => {});
-        }, 5000);
-    } catch (error) {
-        console.error("Could not send warning:", error);
-    }
+  } catch (err) {
+    console.error("Message handler error:", err);
+  }
 });
 
-client.login(TOKEN);
+client.login(process.env.DISCORD_TOKEN);
