@@ -9,6 +9,10 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const ROLE_NAME = "homeys";
 const COOLDOWN = 60 * 60 * 1000; // 1 hour in ms
 
+// --- Channel Configuration ---
+const LOG_CHANNEL_NAME = "ping-logs";
+const LOG_CHANNEL_ID = ""; 
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -25,26 +29,51 @@ client.on("ready", () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
-// Helper: Ban user safely
-async function enforceBan(guild, user, reason, channel) {
+// Helper: Resolve the ping-logs channel
+function getLogChannel(guild, fallbackChannel) {
+  if (LOG_CHANNEL_ID) {
+    const ch = guild.channels.cache.get(LOG_CHANNEL_ID);
+    if (ch) return ch;
+  }
+  if (LOG_CHANNEL_NAME) {
+    const ch = guild.channels.cache.find(
+      (c) => c.name.toLowerCase() === LOG_CHANNEL_NAME.toLowerCase()
+    );
+    if (ch) return ch;
+  }
+  return fallbackChannel;
+}
+
+// Helper: Ban user safely and route log to #ping-logs
+async function enforceBan(guild, user, reason, triggerChannel) {
+  const logChannel = getLogChannel(guild, triggerChannel);
+
   try {
     const member = await guild.members.fetch(user.id).catch(() => null);
     if (!member) {
       await guild.bans.create(user.id, { reason });
-      if (channel) channel.send(`🔨 **Banned** <@${user.id}> for: ${reason}`);
+      if (logChannel) {
+        logChannel.send(`🔨 **Banned** <@${user.id}> | **Reason:** ${reason}`);
+      }
       return;
     }
 
     if (!member.bannable) {
-      if (channel) channel.send(`❌ Cannot ban <@${user.id}>: They outrank the bot or hold Admin immunity.`);
+      if (logChannel) {
+        logChannel.send(`❌ Cannot ban <@${user.id}>: Member outranks the bot or holds Admin immunity.`);
+      }
       return;
     }
 
     await member.ban({ reason });
-    if (channel) channel.send(`🔨 **Banned** <@${user.id}> for: ${reason}`);
+    if (logChannel) {
+      logChannel.send(`🔨 **Banned** <@${user.id}> | **Reason:** ${reason}`);
+    }
   } catch (err) {
     console.error(`Failed to ban user ${user.id}:`, err);
-    if (channel) channel.send(`❌ Failed to ban <@${user.id}> due to missing permissions.`);
+    if (logChannel) {
+      logChannel.send(`❌ Failed to ban <@${user.id}> due to missing permissions.`);
+    }
   }
 }
 
@@ -53,7 +82,7 @@ client.on("messageCreate", async (message) => {
   try {
     if (!message.guild) return;
 
-    // Detect if @homeys is mentioned (normal ping, raw tag, bot, or webhook)
+    // Detect if @homeys is mentioned
     const hasRolePing = message.mentions.roles.some(
       (role) => role.name.toLowerCase() === ROLE_NAME.toLowerCase()
     );
@@ -63,19 +92,19 @@ client.on("messageCreate", async (message) => {
     const now = Date.now();
     const timeSinceLastPing = now - lastPingTime;
 
-    // Allowed ping: resets the cooldown
+    // Allowed ping
     if (timeSinceLastPing >= COOLDOWN) {
       lastPingTime = now;
       console.log(`@${ROLE_NAME} ping allowed.`);
       return;
     }
 
-    // Cooldown violated: delete the offending ping instantly
+    // Cooldown violation: delete the offending ping instantly
     botDeletedMessageIds.add(message.id);
     setTimeout(() => botDeletedMessageIds.delete(message.id), 30000);
     await message.delete().catch(() => {});
 
-    // Case A: Ping was executed via a Webhook
+    // Case A: Webhook ping
     if (message.webhookId) {
       await new Promise((r) => setTimeout(r, 1200));
 
@@ -100,12 +129,13 @@ client.on("messageCreate", async (message) => {
           message.channel
         );
       } else {
-        message.channel.send(`⚠️ Webhook ping blocked during cooldown. (Creator not found in recent audit logs).`);
+        const targetLog = getLogChannel(message.guild, message.channel);
+        targetLog.send(`⚠️ Webhook ping blocked during cooldown. (Creator not found in recent audit logs).`);
       }
       return;
     }
 
-    // Case B: Ping was executed by another bot
+    // Case B: Another bot ping
     if (message.author.bot) {
       if (message.author.id === client.user.id) return;
       await enforceBan(
@@ -129,7 +159,7 @@ client.on("messageCreate", async (message) => {
   }
 });
 
-// --- 2. Ghost Ping Catcher (Roles + Users/Members + Everyone/Here) ---
+// --- 2. Ghost Ping Catcher (Sent directly to #ping-logs) ---
 client.on("messageDelete", async (message) => {
   try {
     if (!message || !message.author || message.author.bot) return;
@@ -142,7 +172,7 @@ client.on("messageDelete", async (message) => {
       message.mentions.roles.forEach((r) => pingList.push(`@${r.name}`));
     }
 
-    // Collect user/member mentions (excluding self-mentions)
+    // Collect user/member mentions (skips self mentions)
     if (message.mentions.users && message.mentions.users.size > 0) {
       message.mentions.users
         .filter((u) => u.id !== message.author.id)
@@ -154,19 +184,20 @@ client.on("messageDelete", async (message) => {
       pingList.push("@everyone / @here");
     }
 
-    // If any real pings were detected, expose the ghost ping
     if (pingList.length > 0) {
+      const targetLogChannel = getLogChannel(message.guild, message.channel);
+
       const embed = new EmbedBuilder()
         .setColor(0xff3344)
         .setTitle("👻 Ghost Ping Detected")
-        .setDescription(`**Author:** <@${message.author.id}> (${message.author.tag})\n**Channel:** <#${message.channel.id}>\n**Mentioned:** ${pingList.join(", ")}`)
+        .setDescription(`**Author:** <@${message.author.id}> (${message.author.tag})\n**Origin Channel:** <#${message.channel.id}>\n**Mentioned:** ${pingList.join(", ")}`)
         .addFields({
           name: "Original Message Content",
           value: message.content && message.content.length > 0 ? message.content : "*[No text / media only]*"
         })
         .setTimestamp();
 
-      await message.channel.send({ embeds: [embed] });
+      await targetLogChannel.send({ embeds: [embed] });
     }
   } catch (error) {
     console.error("Error handling messageDelete:", error);
