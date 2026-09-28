@@ -107,23 +107,23 @@ client.on("messageCreate", async (message) => {
     if (!message.guild) return;
 
     // ==========================================
-    // COMMAND: .setafk <message>
+    // COMMAND: ,setafk <message>
     // ==========================================
-    if (message.content.trim().toLowerCase().startsWith(".setafk")) {
+    if (message.content.trim().toLowerCase().startsWith(",setafk")) {
       const text = message.content.slice(7).trim();
       if (!text) {
-        return message.reply("❌ Please provide the message you want the bot to reply with.\n*Example:* `.setafk Currently AFK, drop a DM if urgent!`");
+        return message.reply("❌ Please provide the message you want the bot to reply with.\n*Example:* `,setafk The fuck did you ping me for?`");
       }
       userCustomReplies.set(message.author.id, text);
-      const reply = await message.reply("✅ Your custom mention message has been updated! The bot will now reply with your embed whenever you are tagged.");
+      const reply = await message.reply("✅ Your custom mention message has been updated!");
       setTimeout(() => reply.delete().catch(() => {}), 5000);
       return;
     }
 
     // ==========================================
-    // COMMAND: .clearafk
+    // COMMAND: ,clearafk
     // ==========================================
-    if (message.content.trim().toLowerCase() === ".clearafk") {
+    if (message.content.trim().toLowerCase() === ",clearafk") {
       userCustomReplies.delete(message.author.id);
       const reply = await message.reply("🗑️ Your custom mention auto-response has been cleared.");
       setTimeout(() => reply.delete().catch(() => {}), 5000);
@@ -131,32 +131,32 @@ client.on("messageCreate", async (message) => {
     }
 
     // ==========================================
-    // COMMAND: .showafk
+    // COMMAND: ,showafk
     // ==========================================
-    if (message.content.trim().toLowerCase() === ".showafk") {
+    if (message.content.trim().toLowerCase() === ",showafk") {
       const current = userCustomReplies.get(message.author.id);
       if (!current) {
-        return message.reply("ℹ️ You do not have an active custom mention message set. Use `.setafk <message>` to set one.");
+        return message.reply("ℹ️ You do not have an active custom mention message set. Use `,setafk <message>` to set one.");
       }
       return message.reply(`📌 **Your current mention message:**\n> ${current}`);
     }
 
     // ==========================================
-    // COMMAND: .purge <amount>
+    // COMMAND: ,purge <amount>
     // ==========================================
-    if (message.content.trim().toLowerCase().startsWith(".purge")) {
+    if (message.content.trim().toLowerCase().startsWith(",purge")) {
       if (
         !message.member.permissions.has(PermissionsBitField.Flags.ManageMessages) &&
         !message.member.permissions.has(PermissionsBitField.Flags.Administrator)
       ) {
-        return message.reply("❌ You need the **Manage Messages** permission to use `.purge`.");
+        return message.reply("❌ You need the **Manage Messages** permission to use `,purge`.");
       }
 
       const args = message.content.trim().split(/\s+/);
       const count = parseInt(args[1], 10);
 
       if (isNaN(count) || count < 1 || count > 100) {
-        return message.reply("❌ Please provide a valid number between **1** and **100**.\n*Example:* `.purge 20`");
+        return message.reply("❌ Please provide a valid number between **1** and **100**.\n*Example:* `,purge 20`");
       }
 
       try {
@@ -181,11 +181,11 @@ client.on("messageCreate", async (message) => {
     }
 
     // ==========================================
-    // COMMAND: !backupserver / !backupembeds
+    // COMMAND: ,backupserver / ,backupembeds
     // ==========================================
     if (
-      message.content.trim().toLowerCase().startsWith("!backupserver") ||
-      message.content.trim().toLowerCase().startsWith("!backupembeds")
+      message.content.trim().toLowerCase().startsWith(",backupserver") ||
+      message.content.trim().toLowerCase().startsWith(",backupembeds")
     ) {
       if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
         return message.reply("❌ Only administrators can run this command.");
@@ -318,15 +318,15 @@ client.on("messageCreate", async (message) => {
     }
 
     // ==========================================
-    // COMMAND: !restoreonlyembeds (Embeds ONLY)
+    // COMMAND: ,restoreonlyembeds (Embeds ONLY)
     // ==========================================
-    if (message.content.trim().toLowerCase().startsWith("!restoreonlyembeds")) {
+    if (message.content.trim().toLowerCase().startsWith(",restoreonlyembeds")) {
       if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
         return message.reply("❌ Only administrators can run this command.");
       }
 
       const file = message.attachments.find((att) => att.name.endsWith(".json"));
-      if (!file) return message.reply("❌ Please attach your backup JSON file with `!restoreonlyembeds`.");
+      if (!file) return message.reply("❌ Please attach your backup JSON file with `,restoreonlyembeds`.");
 
       const statusMsg = await message.reply("⏳ Fast-posting embeds directly into matching channels...");
       try {
@@ -366,17 +366,17 @@ client.on("messageCreate", async (message) => {
     }
 
     // ==========================================
-    // COMMAND: !restoreserver (Default: SKIPS EMBEDS)
+    // COMMAND: ,restoreserver (Default: SKIPS EMBEDS)
     // Add "--embeds" to restore embeds as well
     // ==========================================
-    if (message.content.trim().toLowerCase().startsWith("!restoreserver")) {
+    if (message.content.trim().toLowerCase().startsWith(",restoreserver")) {
       if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
         return message.reply("❌ Only administrators can run this command.");
       }
 
       const file = message.attachments.find((att) => att.name.endsWith(".json"));
       if (!file) {
-        return message.reply("❌ Please upload your `server-full-backup.json` file with `!restoreserver`.");
+        return message.reply("❌ Please upload your `server-full-backup.json` file with `,restoreserver`.");
       }
 
       const commandText = message.content.toLowerCase();
@@ -404,7 +404,7 @@ client.on("messageCreate", async (message) => {
         let existingRoles = await guild.roles.fetch();
         let existingChannels = await guild.channels.fetch();
 
-        // 1. Restore & Update Roles
+        // 1. Roles
         if (snapshot.roles && Array.isArray(snapshot.roles)) {
           for (const r of snapshot.roles) {
             try {
@@ -468,7 +468,7 @@ client.on("messageCreate", async (message) => {
           return overwrites;
         }
 
-        // 2. Restore Categories & Sync Permissions
+        // 2. Categories
         const categoryMap = new Map();
         const categories = (snapshot.channels || []).filter((c) => c.type === ChannelType.GuildCategory);
         for (const cat of categories) {
@@ -503,7 +503,7 @@ client.on("messageCreate", async (message) => {
           }
         }
 
-        // 3. Restore Channels & Sync Permissions
+        // 3. Channels
         const normalChannels = (snapshot.channels || []).filter((c) => c.type !== ChannelType.GuildCategory);
         for (const ch of normalChannels) {
           try {
@@ -547,7 +547,7 @@ client.on("messageCreate", async (message) => {
           }
         }
 
-        // 4. Custom Embeds (Only if requested)
+        // 4. Embeds
         if (includeEmbeds && snapshot.embeds && Array.isArray(snapshot.embeds)) {
           const updatedChannelsList = await guild.channels.fetch();
           for (const item of snapshot.embeds) {
@@ -581,11 +581,11 @@ client.on("messageCreate", async (message) => {
     }
 
     // ==========================================
-    // AUTO-REPLY CUSTOM EMBED ON MENTION (15s Auto-Delete)
+    // AUTO-REPLY CUSTOM EMBED ON MENTION (60s Auto-Delete, No Warning Footer)
     // ==========================================
     if (!message.author.bot && message.mentions.users.size > 0) {
       for (const [userId, user] of message.mentions.users) {
-        if (userId === message.author.id) continue; // Don't trigger if user mentions themselves
+        if (userId === message.author.id) continue;
 
         const customText = userCustomReplies.get(userId);
         if (!customText) continue;
@@ -594,8 +594,8 @@ client.on("messageCreate", async (message) => {
         const lastSent = replyCooldowns.get(cooldownKey) || 0;
         const nowTime = Date.now();
 
-        // 15-second cooldown per channel so it cannot be spammed
-        if (nowTime - lastSent < 15000) continue;
+        // 60-second cooldown per channel so it can't be spammed
+        if (nowTime - lastSent < 60000) continue;
         replyCooldowns.set(cooldownKey, nowTime);
 
         const member = await message.guild.members.fetch(userId).catch(() => null);
@@ -605,20 +605,18 @@ client.on("messageCreate", async (message) => {
         const customEmbed = new EmbedBuilder()
           .setColor(0x5865F2)
           .setAuthor({ name: `${displayName}'s Status`, iconURL: avatarUrl })
-          .setDescription(customText)
-          .setFooter({ text: "This message will self-delete in 15 seconds." })
-          .setTimestamp();
+          .setDescription(customText);
 
         try {
           const autoMsg = await message.reply({ embeds: [customEmbed] });
 
-          // Self-delete after 15 seconds & protect from ghost-ping detector
+          // Self-delete silently after 60 seconds (no ghost ping trigger)
           setTimeout(async () => {
             botDeletedMessageIds.add(autoMsg.id);
             messageCache.delete(autoMsg.id);
             setTimeout(() => botDeletedMessageIds.delete(autoMsg.id), 30000);
             await autoMsg.delete().catch(() => {});
-          }, 15000);
+          }, 60000);
         } catch (e) {
           console.error("Failed to send auto-reply embed:", e.message);
         }
