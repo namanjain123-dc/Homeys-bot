@@ -25,7 +25,7 @@ const COOLDOWN = 60 * 60 * 1000; // 1 hour in ms
 // Dedicated Channel ID for #ping-logs
 const LOG_CHANNEL_ID = "1554030875585421342";
 
-// Bots to IGNORE during embed backups (OwO, Pokétwo, Mudae, Dank Memer, etc.)
+// Bots to IGNORE during embed backups
 const IGNORED_BOT_IDS = [
   "408785106942164992", // OwO Bot
   "854227910977716234", // OwO secondary
@@ -88,7 +88,7 @@ async function enforceBan(guild, user, reason, triggerChannel) {
   }
 }
 
-// Helper: Promise with hard timeout so it never hangs
+// Helper: Promise with hard timeout
 function withTimeout(promise, ms = 4000) {
   return Promise.race([
     promise,
@@ -141,7 +141,7 @@ client.on("messageCreate", async (message) => {
     }
 
     // ==========================================
-    // COMMAND: !backupserver & !backupembeds
+    // COMMAND: !backupserver OR !backupembeds
     // ==========================================
     const cmd = message.content.trim().toLowerCase();
     if (cmd.startsWith("!backupserver") || cmd.startsWith("!backupembeds")) {
@@ -149,14 +149,15 @@ client.on("messageCreate", async (message) => {
         return message.reply("❌ Only administrators can run this command.");
       }
 
-      const statusMsg = await message.reply("⏳ Creating clean server snapshot...");
+      const statusMsg = await message.reply("⏳ Creating full server snapshot (including role & channel permissions)...");
 
       try {
         const guild = message.guild;
 
+        // 1. Roles snapshot (store name, base perms, and color)
         const roles = await guild.roles.fetch();
         const roleData = roles
-          .filter((r) => r.id !== guild.id && !r.managed && r.name !== "@everyone")
+          .filter((r) => !r.managed)
           .sort((a, b) => b.position - a.position)
           .map((r) => ({
             id: r.id,
@@ -165,25 +166,56 @@ client.on("messageCreate", async (message) => {
             hoist: r.hoist,
             mentionable: r.mentionable,
             permissions: r.permissions.bitfield.toString(),
-            position: r.position
+            position: r.position,
+            isEveryone: r.id === guild.id
           }));
 
+        // 2. Channels with Permission Overwrites
         const channels = await guild.channels.fetch();
         const categories = channels.filter((c) => c && c.type === ChannelType.GuildCategory);
         const nonCategories = channels.filter((c) => c && c.type !== ChannelType.GuildCategory);
 
         const channelData = [];
 
+        // Save categories with overwrites
         for (const [_, cat] of categories) {
+          const overwrites = [];
+          cat.permissionOverwrites.cache.forEach((ov) => {
+            const role = roles.get(ov.id);
+            if (role) {
+              overwrites.push({
+                roleName: role.name,
+                isEveryone: role.id === guild.id,
+                allow: ov.allow.bitfield.toString(),
+                deny: ov.deny.bitfield.toString()
+              });
+            }
+          });
+
           channelData.push({
             id: cat.id,
             name: cat.name,
             type: cat.type,
-            rawPosition: cat.rawPosition
+            rawPosition: cat.rawPosition,
+            permissionOverwrites: overwrites
           });
         }
 
+        // Save normal channels with overwrites
         for (const [_, ch] of nonCategories) {
+          const overwrites = [];
+          ch.permissionOverwrites.cache.forEach((ov) => {
+            const role = roles.get(ov.id);
+            if (role) {
+              overwrites.push({
+                roleName: role.name,
+                isEveryone: role.id === guild.id,
+                allow: ov.allow.bitfield.toString(),
+                deny: ov.deny.bitfield.toString()
+              });
+            }
+          });
+
           channelData.push({
             id: ch.id,
             name: ch.name,
@@ -192,10 +224,12 @@ client.on("messageCreate", async (message) => {
             nsfw: ch.nsfw || false,
             rateLimitPerUser: ch.rateLimitPerUser || 0,
             parentName: ch.parent ? ch.parent.name : null,
-            rawPosition: ch.rawPosition
+            rawPosition: ch.rawPosition,
+            permissionOverwrites: overwrites
           });
         }
 
+        // 3. Custom Server Embeds
         const embedData = [];
         let channelsToScan = [];
 
@@ -247,7 +281,7 @@ client.on("messageCreate", async (message) => {
         const attachment = new AttachmentBuilder(buffer, { name: "server-full-backup.json" });
 
         await statusMsg.edit({
-          content: `✅ **Clean Server Snapshot Complete!**\n• Roles: **${roleData.length}**\n• Channels & Categories: **${channelData.length}**\n• Clean Server Embeds: **${embedData.length}**`,
+          content: `✅ **Full Server Snapshot Complete!**\n• Roles with base perms: **${roleData.length}**\n• Channels & categories with permission overwrites: **${channelData.length}**\n• Clean Server Embeds: **${embedData.length}**\n\nRun \`!restoreserver\` with this file attached.`,
           files: [attachment]
         });
       } catch (err) {
@@ -258,7 +292,7 @@ client.on("messageCreate", async (message) => {
     }
 
     // ==========================================
-    // COMMAND: !restoreonlyembeds (Direct Fast Mode)
+    // COMMAND: !restoreonlyembeds
     // ==========================================
     if (message.content.trim().toLowerCase().startsWith("!restoreonlyembeds")) {
       if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
@@ -280,10 +314,7 @@ client.on("messageCreate", async (message) => {
             const ch = guildChannels.find(
               (c) => c && (c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement) && c.name.toLowerCase() === item.channelName.toLowerCase()
             );
-            if (!ch) {
-              console.log(`[SKIP EMBED] Channel #${item.channelName} not found.`);
-              continue;
-            }
+            if (!ch) continue;
 
             for (const data of item.embeds) {
               try {
@@ -306,7 +337,7 @@ client.on("messageCreate", async (message) => {
     }
 
     // ==========================================
-    // COMMAND: !restoreserver (Stall-Proof Rebuild)
+    // COMMAND: !restoreserver (With Channel Permissions & Role Overwrites)
     // ==========================================
     if (message.content.trim().toLowerCase().startsWith("!restoreserver")) {
       if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
@@ -319,7 +350,7 @@ client.on("messageCreate", async (message) => {
       }
 
       console.log(`[RESTORE INITIATED] Downloading file: ${file.url}`);
-      const statusMsg = await message.reply("⏳ Restoring server (stall-proof mode)...");
+      const statusMsg = await message.reply("⏳ Restoring roles, channels, and exact role permissions...");
 
       try {
         const response = await fetch(file.url);
@@ -331,14 +362,19 @@ client.on("messageCreate", async (message) => {
         let createdChannels = 0;
         let restoredEmbeds = 0;
 
-        const existingRoles = await guild.roles.fetch();
-        const existingChannels = await guild.channels.fetch();
+        let existingRoles = await guild.roles.fetch();
+        let existingChannels = await guild.channels.fetch();
 
-        // 1. Restore Roles
+        // 1. Restore Roles (Skip @everyone from creation, but update its base perms)
         if (snapshot.roles && Array.isArray(snapshot.roles)) {
           for (const r of snapshot.roles) {
             try {
-              if (r.name === "@everyone") continue;
+              if (r.isEveryone || r.name === "@everyone") {
+                // Apply permissions to @everyone
+                await guild.roles.everyone.setPermissions(BigInt(r.permissions)).catch(() => {});
+                continue;
+              }
+
               const match = existingRoles.find((ex) => ex.name.toLowerCase() === r.name.toLowerCase());
               if (!match) {
                 console.log(`[RESTORE ROLE] Creating: ${r.name}`);
@@ -355,8 +391,6 @@ client.on("messageCreate", async (message) => {
                 );
                 createdRoles++;
                 await new Promise((res) => setTimeout(res, 350));
-              } else {
-                console.log(`[RESTORE ROLE] Skipping existing: ${r.name}`);
               }
             } catch (err) {
               console.error(`[ROLE ERROR] ${r.name}:`, err.message);
@@ -364,7 +398,30 @@ client.on("messageCreate", async (message) => {
           }
         }
 
-        // 2. Restore Categories
+        // Refresh roles to map permission overwrites accurately
+        existingRoles = await guild.roles.fetch();
+
+        // Helper: Convert saved overwrites into live Discord role IDs
+        const buildOverwrites = (savedOverwrites) => {
+          if (!savedOverwrites || !Array.isArray(savedOverwrites)) return [];
+          const list = [];
+          for (const ov of savedOverwrites) {
+            const role = ov.isEveryone
+              ? guild.roles.everyone
+              : existingRoles.find((r) => r.name.toLowerCase() === ov.roleName.toLowerCase());
+
+            if (role) {
+              list.push({
+                id: role.id,
+                allow: BigInt(ov.allow),
+                deny: BigInt(ov.deny)
+              });
+            }
+          }
+          return list;
+        };
+
+        // 2. Restore Categories (with permissions)
         const categoryMap = new Map();
         const categories = (snapshot.channels || []).filter((c) => c.type === ChannelType.GuildCategory);
         for (const cat of categories) {
@@ -372,20 +429,24 @@ client.on("messageCreate", async (message) => {
             let catObj = existingChannels.find(
               (c) => c && c.type === ChannelType.GuildCategory && c.name.toLowerCase() === cat.name.toLowerCase()
             );
+            const overwrites = buildOverwrites(cat.permissionOverwrites);
+
             if (!catObj) {
               console.log(`[RESTORE CATEGORY] Creating: ${cat.name}`);
               catObj = await withTimeout(
                 guild.channels.create({
                   name: cat.name,
                   type: ChannelType.GuildCategory,
+                  permissionOverwrites: overwrites,
                   reason: "Restored from backup"
                 }),
                 3500
               );
               createdChannels++;
               await new Promise((res) => setTimeout(res, 350));
-            } else {
-              console.log(`[RESTORE CATEGORY] Skipping existing: ${cat.name}`);
+            } else if (overwrites.length > 0) {
+              // Apply permissions if category already exists
+              await catObj.permissionOverwrites.set(overwrites).catch(() => {});
             }
             categoryMap.set(cat.name.toLowerCase(), catObj.id);
           } catch (err) {
@@ -393,7 +454,7 @@ client.on("messageCreate", async (message) => {
           }
         }
 
-        // 3. Restore Channels (Converts Announcement to GuildText automatically)
+        // 3. Restore Channels (with permissions and announcement fallback)
         const normalChannels = (snapshot.channels || []).filter((c) => c.type !== ChannelType.GuildCategory);
         for (const ch of normalChannels) {
           try {
@@ -401,11 +462,12 @@ client.on("messageCreate", async (message) => {
               (c) => c && c.name.toLowerCase() === ch.name.toLowerCase()
             );
             const parentId = ch.parentName ? categoryMap.get(ch.parentName.toLowerCase()) : null;
+            const overwrites = buildOverwrites(ch.permissionOverwrites);
 
             if (!chObj) {
               const safeType = ch.type === ChannelType.GuildAnnouncement ? ChannelType.GuildText : ch.type;
-              console.log(`[RESTORE CHANNEL] Creating #${ch.name} (Type: ${safeType})`);
-              
+              console.log(`[RESTORE CHANNEL] Creating #${ch.name}`);
+
               await withTimeout(
                 guild.channels.create({
                   name: ch.name,
@@ -414,6 +476,7 @@ client.on("messageCreate", async (message) => {
                   nsfw: ch.nsfw,
                   rateLimitPerUser: ch.rateLimitPerUser,
                   parent: parentId || undefined,
+                  permissionOverwrites: overwrites,
                   reason: "Restored from backup"
                 }),
                 3500
@@ -422,13 +485,16 @@ client.on("messageCreate", async (message) => {
               createdChannels++;
               await new Promise((res) => setTimeout(res, 350));
             } else {
-              console.log(`[RESTORE CHANNEL] Skipping existing: #${ch.name}`);
+              // Channel exists: sync parent and permission overwrites
               if (parentId && chObj.parentId !== parentId) {
                 await chObj.setParent(parentId).catch(() => {});
               }
+              if (overwrites.length > 0) {
+                await chObj.permissionOverwrites.set(overwrites).catch(() => {});
+              }
             }
           } catch (err) {
-            console.error(`[CH ERROR SKIPPED] #${ch.name}:`, err.message);
+            console.error(`[CH ERROR] #${ch.name}:`, err.message);
           }
         }
 
@@ -456,7 +522,7 @@ client.on("messageCreate", async (message) => {
         }
 
         await statusMsg.edit(
-          `✅ **Server Rebuild Complete!**\n• Roles added: **${createdRoles}**\n• Channels added: **${createdChannels}**\n• Embeds re-posted: **${restoredEmbeds}**`
+          `✅ **Server Rebuild Complete!**\n• Roles restored/verified: **${createdRoles}**\n• Channels & categories restored with permissions: **${createdChannels}**\n• Embeds re-posted: **${restoredEmbeds}**`
         );
       } catch (err) {
         console.error("[RESTORE CRITICAL ERROR]:", err);
