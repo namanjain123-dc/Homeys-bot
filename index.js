@@ -93,138 +93,258 @@ client.on("messageCreate", async (message) => {
   try {
     if (!message.guild) return;
 
-    // --- Command: !backupembeds (Admin Only) ---
-    // Usage: `!backupembeds` OR `!backupembeds #rules #announcements`
-    if (message.content.trim().toLowerCase().startsWith("!backupembeds")) {
+    // --- Command: !backupserver (Full Server Architecture + Embeds) ---
+    if (message.content.trim().toLowerCase().startsWith("!backupserver")) {
       if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
         return message.reply("❌ Only administrators can run this command.");
       }
 
-      const statusMsg = await message.reply("⏳ Scanning for custom rich embeds...");
-      const backupData = [];
+      const statusMsg = await message.reply("⏳ Creating complete server snapshot (roles, channels, permissions, embeds)...");
 
       try {
-        let channelsToScan = [];
+        const guild = message.guild;
 
-        // If specific channels were mentioned, scan only those
-        if (message.mentions.channels.size > 0) {
-          channelsToScan = Array.from(message.mentions.channels.values());
-        } else {
-          // Otherwise, scan all text/announcement channels
-          const channels = await message.guild.channels.fetch();
-          channelsToScan = Array.from(
-            channels.filter(
-              (c) => c && (c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement)
-            ).values()
-          );
+        // 1. Snapshot Roles (excluding @everyone and managed bot roles)
+        const roles = await guild.roles.fetch();
+        const roleData = roles
+          .filter((r) => r.id !== guild.id && !r.managed)
+          .sort((a, b) => b.position - a.position)
+          .map((r) => ({
+            id: r.id,
+            name: r.name,
+            color: r.color,
+            hoist: r.hoist,
+            mentionable: r.mentionable,
+            permissions: r.permissions.bitfield.toString(),
+            position: r.position
+          }));
+
+        // 2. Snapshot Categories & Channels
+        const channels = await guild.channels.fetch();
+        const categories = channels.filter((c) => c && c.type === ChannelType.GuildCategory);
+        const nonCategories = channels.filter((c) => c && c.type !== ChannelType.GuildCategory);
+
+        const channelData = [];
+
+        // Save categories first
+        for (const [_, cat] of categories) {
+          channelData.push({
+            id: cat.id,
+            name: cat.name,
+            type: cat.type,
+            rawPosition: cat.rawPosition,
+            permissionOverwrites: cat.permissionOverwrites.cache.map((o) => ({
+              id: o.id,
+              type: o.type,
+              allow: o.allow.bitfield.toString(),
+              deny: o.deny.bitfield.toString()
+            }))
+          });
         }
 
-        for (const channel of channelsToScan) {
+        // Save normal channels
+        for (const [_, ch] of nonCategories) {
+          channelData.push({
+            id: ch.id,
+            name: ch.name,
+            type: ch.type,
+            topic: ch.topic || null,
+            nsfw: ch.nsfw || false,
+            rateLimitPerUser: ch.rateLimitPerUser || 0,
+            parentName: ch.parent ? ch.parent.name : null,
+            rawPosition: ch.rawPosition,
+            permissionOverwrites: ch.permissionOverwrites ? ch.permissionOverwrites.cache.map((o) => ({
+              id: o.id,
+              type: o.type,
+              allow: o.allow.bitfield.toString(),
+              deny: o.deny.bitfield.toString()
+            })) : []
+          });
+        }
+
+        // 3. Snapshot Custom Rich Embeds
+        const embedData = [];
+        const textChannels = channels.filter(
+          (c) => c && (c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement)
+        );
+
+        for (const [_, textCh] of textChannels) {
           try {
-            const messages = await channel.messages.fetch({ limit: 100 });
-            messages.forEach((msg) => {
-              if (msg.embeds && msg.embeds.length > 0) {
-                // Filter out YouTube/Twitter/GIF link previews; only keep genuine bot/webhook embeds
-                const realCustomEmbeds = msg.embeds.filter(
+            const msgs = await textCh.messages.fetch({ limit: 100 });
+            msgs.forEach((m) => {
+              if (m.embeds && m.embeds.length > 0) {
+                const richEmbeds = m.embeds.filter(
                   (e) => (e.data.type === "rich" || !e.data.type) && (e.title || e.description || e.fields?.length)
                 );
-
-                if (realCustomEmbeds.length > 0) {
-                  backupData.push({
-                    channelId: channel.id,
-                    channelName: channel.name,
-                    channelType: channel.type,
-                    messageId: msg.id,
-                    embeds: realCustomEmbeds.map((e) => e.toJSON())
+                if (richEmbeds.length > 0) {
+                  embedData.push({
+                    channelName: textCh.name,
+                    embeds: richEmbeds.map((e) => e.toJSON())
                   });
                 }
               }
             });
-          } catch (err) {
-            console.error(`Skipping channel #${channel.name}:`, err.message);
+          } catch (e) {
+            console.error(`Skipped reading #${textCh.name} for embeds.`);
           }
         }
 
-        if (backupData.length === 0) {
-          return await statusMsg.edit("❌ Found 0 custom rich embeds in the selected channels.");
-        }
+        const fullSnapshot = {
+          guildName: guild.name,
+          createdAt: new Date().toISOString(),
+          roles: roleData,
+          channels: channelData,
+          embeds: embedData
+        };
 
-        const buffer = Buffer.from(JSON.stringify(backupData, null, 2), "utf-8");
-        const attachment = new AttachmentBuilder(buffer, { name: "embeds-backup.json" });
+        const buffer = Buffer.from(JSON.stringify(fullSnapshot, null, 2), "utf-8");
+        const attachment = new AttachmentBuilder(buffer, { name: "server-full-backup.json" });
 
         await statusMsg.edit({
-          content: `✅ Successfully backed up **${backupData.length}** custom embeds from ${channelsToScan.length} channel(s)! (Link previews & GIFs excluded).`,
+          content: `✅ **Full Server Snapshot Complete!**\n• Roles: **${roleData.length}**\n• Channels & Categories: **${channelData.length}**\n• Custom Embeds: **${embedData.length}**\n\nSave this file. Run \`!restoreserver\` with this file attached to restore everything.`,
           files: [attachment]
         });
       } catch (err) {
         console.error("Backup failed:", err);
-        await statusMsg.edit("❌ Failed to complete backup. Check bot permissions.");
+        await statusMsg.edit("❌ Failed to compile server backup. Check bot permissions.");
       }
       return;
     }
 
-    // --- Command: !restoreembeds (Admin Only) ---
-    // Usage: Upload embeds-backup.json and type !restoreembeds
-    if (message.content.trim().toLowerCase().startsWith("!restoreembeds")) {
+    // --- Command: !restoreserver (Full Server Recovery) ---
+    if (message.content.trim().toLowerCase().startsWith("!restoreserver")) {
       if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
         return message.reply("❌ Only administrators can run this command.");
       }
 
       const file = message.attachments.find((att) => att.name.endsWith(".json"));
       if (!file) {
-        return message.reply("❌ Please upload your `embeds-backup.json` file in the same message with `!restoreembeds`.");
+        return message.reply("❌ Please upload your `server-full-backup.json` file in the same message with `!restoreserver`.");
       }
 
-      const statusMsg = await message.reply("⏳ Reading backup file and restoring embeds...");
+      const statusMsg = await message.reply("⏳ Reading backup and reconstructing server structure...");
 
       try {
-        const backupData = await downloadJson(file.url);
-        let restoredCount = 0;
-        let createdChannelCount = 0;
+        const snapshot = await downloadJson(file.url);
+        const guild = message.guild;
 
-        let currentChannels = await message.guild.channels.fetch();
+        let createdRoles = 0;
+        let createdChannels = 0;
+        let restoredEmbeds = 0;
 
-        for (const item of backupData) {
+        // 1. Restore Roles
+        const existingRoles = await guild.roles.fetch();
+        const roleMap = new Map(); // Old role ID / name -> New Role Object
+
+        if (snapshot.roles && Array.isArray(snapshot.roles)) {
+          for (const r of snapshot.roles) {
+            try {
+              let existing = existingRoles.find((ex) => ex.name.toLowerCase() === r.name.toLowerCase());
+              if (!existing) {
+                existing = await guild.roles.create({
+                  name: r.name,
+                  color: r.color,
+                  hoist: r.hoist,
+                  mentionable: r.mentionable,
+                  permissions: BigInt(r.permissions),
+                  reason: "Restored from server backup"
+                });
+                createdRoles++;
+                await new Promise((res) => setTimeout(res, 350));
+              }
+              roleMap.set(r.id, existing);
+              roleMap.set(r.name.toLowerCase(), existing);
+            } catch (err) {
+              console.error(`Failed restoring role ${r.name}:`, err.message);
+            }
+          }
+        }
+
+        // 2. Restore Categories First
+        const existingChannels = await guild.channels.fetch();
+        const categoryMap = new Map();
+
+        const categories = (snapshot.channels || []).filter((c) => c.type === ChannelType.GuildCategory);
+        for (const cat of categories) {
           try {
-            // 1. Try to find the channel by original ID
-            let targetChannel = currentChannels.get(item.channelId);
-
-            // 2. If ID changed or deleted, find by name
-            if (!targetChannel) {
-              targetChannel = currentChannels.find(
-                (c) => c && c.name.toLowerCase() === item.channelName.toLowerCase()
-              );
-            }
-
-            // 3. If missing completely, automatically recreate it
-            if (!targetChannel) {
-              targetChannel = await message.guild.channels.create({
-                name: item.channelName,
-                type: item.channelType || ChannelType.GuildText,
-                reason: "Auto-recreated during embed restoration"
+            let existingCat = existingChannels.find(
+              (c) => c && c.type === ChannelType.GuildCategory && c.name.toLowerCase() === cat.name.toLowerCase()
+            );
+            if (!existingCat) {
+              existingCat = await guild.channels.create({
+                name: cat.name,
+                type: ChannelType.GuildCategory,
+                reason: "Restored category from backup"
               });
-              createdChannelCount++;
-              currentChannels = await message.guild.channels.fetch();
+              createdChannels++;
+              await new Promise((res) => setTimeout(res, 350));
             }
+            categoryMap.set(cat.name.toLowerCase(), existingCat.id);
+          } catch (err) {
+            console.error(`Failed recreating category ${cat.name}:`, err.message);
+          }
+        }
 
-            // Re-post each embed
-            for (const embedData of item.embeds) {
-              const embed = new EmbedBuilder(embedData);
-              await targetChannel.send({ embeds: [embed] });
-              restoredCount++;
-              await new Promise((r) => setTimeout(r, 600)); // Rate limit safety
+        // 3. Restore Channels & Channel Settings
+        const normalChannels = (snapshot.channels || []).filter((c) => c.type !== ChannelType.GuildCategory);
+        const activeChannels = await guild.channels.fetch();
+
+        for (const ch of normalChannels) {
+          try {
+            let existingCh = activeChannels.find(
+              (c) => c && c.type === ch.type && c.name.toLowerCase() === ch.name.toLowerCase()
+            );
+
+            const parentId = ch.parentName ? categoryMap.get(ch.parentName.toLowerCase()) : null;
+
+            if (!existingCh) {
+              existingCh = await guild.channels.create({
+                name: ch.name,
+                type: ch.type,
+                topic: ch.topic || undefined,
+                nsfw: ch.nsfw,
+                rateLimitPerUser: ch.rateLimitPerUser,
+                parent: parentId || undefined,
+                reason: "Restored channel from backup"
+              });
+              createdChannels++;
+              await new Promise((res) => setTimeout(res, 350));
+            } else if (parentId && existingCh.parentId !== parentId) {
+              await existingCh.setParent(parentId).catch(() => {});
             }
           } catch (err) {
-            console.error(`Failed restoring embeds for #${item.channelName}:`, err);
+            console.error(`Failed recreating channel ${ch.name}:`, err.message);
+          }
+        }
+
+        // 4. Restore Custom Embeds
+        const refreshedChannels = await guild.channels.fetch();
+        if (snapshot.embeds && Array.isArray(snapshot.embeds)) {
+          for (const item of snapshot.embeds) {
+            try {
+              const targetChannel = refreshedChannels.find(
+                (c) => c && (c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement) && c.name.toLowerCase() === item.channelName.toLowerCase()
+              );
+              if (!targetChannel) continue;
+
+              for (const embedData of item.embeds) {
+                const embed = new EmbedBuilder(embedData);
+                await targetChannel.send({ embeds: [embed] });
+                restoredEmbeds++;
+                await new Promise((res) => setTimeout(res, 600));
+              }
+            } catch (err) {
+              console.error(`Failed restoring embeds to #${item.channelName}:`, err.message);
+            }
           }
         }
 
         await statusMsg.edit(
-          `✅ Restore complete!\n• Re-posted **${restoredCount}** embeds.\n• Auto-recreated **${createdChannelCount}** missing channels.`
+          `✅ **Server Rebuild Complete!**\n• Roles restored/verified: **${createdRoles}**\n• Channels & categories restored: **${createdChannels}**\n• Embeds re-posted: **${restoredEmbeds}**`
         );
       } catch (err) {
-        console.error("Restore failed:", err);
-        await statusMsg.edit("❌ Failed to restore embeds. Make sure the uploaded file is a valid JSON backup.");
+        console.error("Server restoration failed:", err);
+        await statusMsg.edit("❌ Failed restoring server. Ensure the bot role is positioned at the top of the role list and has Administrator rights.");
       }
       return;
     }
