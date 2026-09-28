@@ -94,33 +94,50 @@ client.on("messageCreate", async (message) => {
     if (!message.guild) return;
 
     // --- Command: !backupembeds (Admin Only) ---
-    if (message.content.trim().toLowerCase() === "!backupembeds") {
+    // Usage: `!backupembeds` OR `!backupembeds #rules #announcements`
+    if (message.content.trim().toLowerCase().startsWith("!backupembeds")) {
       if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
         return message.reply("❌ Only administrators can run this command.");
       }
 
-      const statusMsg = await message.reply("⏳ Scanning channels and backing up embeds...");
+      const statusMsg = await message.reply("⏳ Scanning for custom rich embeds...");
       const backupData = [];
 
       try {
-        const channels = await message.guild.channels.fetch();
-        const textChannels = channels.filter(
-          (c) => c && (c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement)
-        );
+        let channelsToScan = [];
 
-        for (const [_, channel] of textChannels) {
+        // If specific channels were mentioned, scan only those
+        if (message.mentions.channels.size > 0) {
+          channelsToScan = Array.from(message.mentions.channels.values());
+        } else {
+          // Otherwise, scan all text/announcement channels
+          const channels = await message.guild.channels.fetch();
+          channelsToScan = Array.from(
+            channels.filter(
+              (c) => c && (c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement)
+            ).values()
+          );
+        }
+
+        for (const channel of channelsToScan) {
           try {
             const messages = await channel.messages.fetch({ limit: 100 });
             messages.forEach((msg) => {
               if (msg.embeds && msg.embeds.length > 0) {
-                backupData.push({
-                  channelId: channel.id,
-                  channelName: channel.name,
-                  channelType: channel.type,
-                  messageId: msg.id,
-                  createdAt: msg.createdAt,
-                  embeds: msg.embeds.map((e) => e.toJSON())
-                });
+                // Filter out YouTube/Twitter/GIF link previews; only keep genuine bot/webhook embeds
+                const realCustomEmbeds = msg.embeds.filter(
+                  (e) => (e.data.type === "rich" || !e.data.type) && (e.title || e.description || e.fields?.length)
+                );
+
+                if (realCustomEmbeds.length > 0) {
+                  backupData.push({
+                    channelId: channel.id,
+                    channelName: channel.name,
+                    channelType: channel.type,
+                    messageId: msg.id,
+                    embeds: realCustomEmbeds.map((e) => e.toJSON())
+                  });
+                }
               }
             });
           } catch (err) {
@@ -128,11 +145,15 @@ client.on("messageCreate", async (message) => {
           }
         }
 
+        if (backupData.length === 0) {
+          return await statusMsg.edit("❌ Found 0 custom rich embeds in the selected channels.");
+        }
+
         const buffer = Buffer.from(JSON.stringify(backupData, null, 2), "utf-8");
         const attachment = new AttachmentBuilder(buffer, { name: "embeds-backup.json" });
 
         await statusMsg.edit({
-          content: `✅ Successfully backed up **${backupData.length}** embed messages! If channels ever get deleted, the bot will automatically recreate them by name when you run \`!restoreembeds\`.`,
+          content: `✅ Successfully backed up **${backupData.length}** custom embeds from ${channelsToScan.length} channel(s)! (Link previews & GIFs excluded).`,
           files: [attachment]
         });
       } catch (err) {
@@ -143,6 +164,7 @@ client.on("messageCreate", async (message) => {
     }
 
     // --- Command: !restoreembeds (Admin Only) ---
+    // Usage: Upload embeds-backup.json and type !restoreembeds
     if (message.content.trim().toLowerCase().startsWith("!restoreembeds")) {
       if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
         return message.reply("❌ Only administrators can run this command.");
@@ -160,7 +182,6 @@ client.on("messageCreate", async (message) => {
         let restoredCount = 0;
         let createdChannelCount = 0;
 
-        // Fetch current active server channels
         let currentChannels = await message.guild.channels.fetch();
 
         for (const item of backupData) {
@@ -168,31 +189,30 @@ client.on("messageCreate", async (message) => {
             // 1. Try to find the channel by original ID
             let targetChannel = currentChannels.get(item.channelId);
 
-            // 2. If deleted, try finding an existing channel with the same name
+            // 2. If ID changed or deleted, find by name
             if (!targetChannel) {
               targetChannel = currentChannels.find(
                 (c) => c && c.name.toLowerCase() === item.channelName.toLowerCase()
               );
             }
 
-            // 3. If completely missing, recreate the channel automatically
+            // 3. If missing completely, automatically recreate it
             if (!targetChannel) {
               targetChannel = await message.guild.channels.create({
                 name: item.channelName,
                 type: item.channelType || ChannelType.GuildText,
-                reason: "Auto-recreated during embed restoration after deletion"
+                reason: "Auto-recreated during embed restoration"
               });
               createdChannelCount++;
-              // Refresh channel cache
               currentChannels = await message.guild.channels.fetch();
             }
 
-            // Post the embeds into the resolved or recreated channel
+            // Re-post each embed
             for (const embedData of item.embeds) {
               const embed = new EmbedBuilder(embedData);
               await targetChannel.send({ embeds: [embed] });
               restoredCount++;
-              await new Promise((r) => setTimeout(r, 600)); // Discord rate-limit safety
+              await new Promise((r) => setTimeout(r, 600)); // Rate limit safety
             }
           } catch (err) {
             console.error(`Failed restoring embeds for #${item.channelName}:`, err);
