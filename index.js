@@ -45,6 +45,7 @@ const client = new Client({
 });
 
 let lastPingTime = 0;
+let homeysProtectionEnabled = true; // Toggle flag for the @homeys cooldown/ban system
 const botDeletedMessageIds = new Set();
 const messageCache = new Map();
 
@@ -105,6 +106,36 @@ function withTimeout(promise, ms = 4000) {
 client.on("messageCreate", async (message) => {
   try {
     if (!message.guild) return;
+
+    // ==========================================
+    // COMMAND: ,togglehomeys / ,homeystoggle
+    // ==========================================
+    if (
+      message.content.trim().toLowerCase() === ",togglehomeys" ||
+      message.content.trim().toLowerCase() === ",homeystoggle"
+    ) {
+      if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        return message.reply("❌ Only administrators can toggle the @homeys protection.");
+      }
+
+      homeysProtectionEnabled = !homeysProtectionEnabled;
+      return message.reply(
+        homeysProtectionEnabled
+          ? "🛡️ **@homeys Protection ENABLED.** The 1-hour cooldown and auto-ban enforcement are now active."
+          : "⚠️ **@homeys Protection DISABLED.** Anyone can ping @homeys without cooldowns or bans."
+      );
+    }
+
+    // ==========================================
+    // COMMAND: ,homeysstatus
+    // ==========================================
+    if (message.content.trim().toLowerCase() === ",homeysstatus") {
+      return message.reply(
+        homeysProtectionEnabled
+          ? "🛡️ **@homeys Protection Status:** Active (1-hour cooldown & auto-bans ON)"
+          : "⚠️ **@homeys Protection Status:** Disabled (Pings allowed freely)"
+      );
+    }
 
     // ==========================================
     // COMMAND: ,setafk <message>
@@ -594,7 +625,6 @@ client.on("messageCreate", async (message) => {
         const lastSent = replyCooldowns.get(cooldownKey) || 0;
         const nowTime = Date.now();
 
-        // 60-second cooldown per channel so it can't be spammed
         if (nowTime - lastSent < 60000) continue;
         replyCooldowns.set(cooldownKey, nowTime);
 
@@ -610,7 +640,6 @@ client.on("messageCreate", async (message) => {
         try {
           const autoMsg = await message.reply({ embeds: [customEmbed] });
 
-          // Self-delete silently after 60 seconds (no ghost ping trigger)
           setTimeout(async () => {
             botDeletedMessageIds.add(autoMsg.id);
             messageCache.delete(autoMsg.id);
@@ -661,6 +690,11 @@ client.on("messageCreate", async (message) => {
     );
 
     if (!hasRolePing) return;
+
+    // If disabled via command, ignore cooldown checks and bans entirely
+    if (!homeysProtectionEnabled) {
+      return;
+    }
 
     const now = Date.now();
     const timeSinceLastPing = now - lastPingTime;
