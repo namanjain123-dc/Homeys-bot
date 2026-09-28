@@ -25,7 +25,7 @@ const COOLDOWN = 60 * 60 * 1000; // 1 hour in ms
 // Dedicated Channel ID for #ping-logs
 const LOG_CHANNEL_ID = "1554030875585421342";
 
-// Bots to IGNORE during embed backups (OwO, Pokétwo, Mudae, Dank Memer, etc.)
+// Bots to IGNORE during embed backups
 const IGNORED_BOT_IDS = [
   "408785106942164992", // OwO Bot
   "854227910977716234", // OwO secondary
@@ -88,12 +88,17 @@ async function enforceBan(guild, user, reason, triggerChannel) {
   }
 }
 
-// Helper: Promise with hard timeout so it never hangs
-function withTimeout(promise, ms = 4000) {
+// Promise wrapper with strict 4s timeout so it NEVER hangs
+function timeoutPromise(promise, ms = 4000) {
   return Promise.race([
     promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), ms))
+    new Promise((_, reject) => setTimeout(() => reject(new Error("Operation Timed Out")), ms))
   ]);
+}
+
+// Clean normalize helper for channel & category names
+function normalizeName(str) {
+  return (str || "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
 // --- 1. Message Create Handler ---
@@ -134,16 +139,19 @@ client.on("messageCreate", async (message) => {
         setTimeout(() => confirmMsg.delete().catch(() => {}), 4000);
       } catch (err) {
         console.error("Purge Error:", err);
-        message.channel.send("❌ Could not purge messages (Discord cannot bulk delete messages older than 14 days).")
+        message.channel.send("❌ Could not purge messages (Discord cannot bulk-delete messages older than 14 days).")
           .then((m) => setTimeout(() => m.delete().catch(() => {}), 5000));
       }
       return;
     }
 
     // ==========================================
-    // COMMAND: !backupserver
+    // COMMAND: !backupserver & !backupembeds
     // ==========================================
-    if (message.content.trim().toLowerCase().startsWith("!backupserver")) {
+    if (
+      message.content.trim().toLowerCase().startsWith("!backupserver") ||
+      message.content.trim().toLowerCase().startsWith("!backupembeds")
+    ) {
       if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
         return message.reply("❌ Only administrators can run this command.");
       }
@@ -155,7 +163,7 @@ client.on("messageCreate", async (message) => {
 
         const roles = await guild.roles.fetch();
         const roleData = roles
-          .filter((r) => r.id !== guild.id && !r.managed)
+          .filter((r) => r.id !== guild.id && !r.managed && r.name !== "@everyone")
           .sort((a, b) => b.position - a.position)
           .map((r) => ({
             id: r.id,
@@ -246,7 +254,7 @@ client.on("messageCreate", async (message) => {
         const attachment = new AttachmentBuilder(buffer, { name: "server-full-backup.json" });
 
         await statusMsg.edit({
-          content: `✅ **Clean Server Snapshot Complete!**\n• Roles: **${roleData.length}**\n• Channels & Categories: **${channelData.length}**\n• Clean Server Embeds: **${embedData.length}**`,
+          content: `✅ **Server Snapshot Complete!**\n• Roles: **${roleData.length}**\n• Channels & Categories: **${channelData.length}**\n• Embeds captured: **${embedData.length}**\n\nRun \`!restoreserver\` with this attached file to rebuild everything.`,
           files: [attachment]
         });
       } catch (err) {
@@ -257,55 +265,7 @@ client.on("messageCreate", async (message) => {
     }
 
     // ==========================================
-    // COMMAND: !restoreonlyembeds (Direct Fast Mode)
-    // ==========================================
-    if (message.content.trim().toLowerCase().startsWith("!restoreonlyembeds")) {
-      if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-        return message.reply("❌ Only administrators can run this command.");
-      }
-
-      const file = message.attachments.find((att) => att.name.endsWith(".json"));
-      if (!file) return message.reply("❌ Please attach your backup JSON file with `!restoreonlyembeds`.");
-
-      const statusMsg = await message.reply("⏳ Fast-posting embeds directly into matching channels...");
-      try {
-        const response = await fetch(file.url);
-        const snapshot = await response.json();
-        const guildChannels = await message.guild.channels.fetch();
-        let restored = 0;
-
-        if (snapshot.embeds && Array.isArray(snapshot.embeds)) {
-          for (const item of snapshot.embeds) {
-            const ch = guildChannels.find(
-              (c) => c && (c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement) && c.name.toLowerCase() === item.channelName.toLowerCase()
-            );
-            if (!ch) {
-              console.log(`[SKIP EMBED] Channel #${item.channelName} not found.`);
-              continue;
-            }
-
-            for (const data of item.embeds) {
-              try {
-                const embed = new EmbedBuilder(data);
-                await ch.send({ embeds: [embed] });
-                restored++;
-                console.log(`[POSTED EMBED] #${ch.name}`);
-                await new Promise((r) => setTimeout(r, 600));
-              } catch (e) {
-                console.error(`[EMBED FAIL] #${ch.name}:`, e.message);
-              }
-            }
-          }
-        }
-        await statusMsg.edit(`✅ **Restore Complete!** Re-posted **${restored}** embeds.`);
-      } catch (err) {
-        await statusMsg.edit(`❌ Error: ${err.message}`);
-      }
-      return;
-    }
-
-    // ==========================================
-    // COMMAND: !restoreserver (100% Stall-Proof)
+    // COMMAND: !restoreserver (FULL REBUILD GUARANTEED)
     // ==========================================
     if (message.content.trim().toLowerCase().startsWith("!restoreserver")) {
       if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
@@ -314,153 +274,181 @@ client.on("messageCreate", async (message) => {
 
       const file = message.attachments.find((att) => att.name.endsWith(".json"));
       if (!file) {
-        return message.reply("❌ Please upload your `server-full-backup.json` file with `!restoreserver`.");
+        return message.reply("❌ Please upload your `server-full-backup.json` file together with `!restoreserver`.");
       }
 
       console.log(`[RESTORE INITIATED] Downloading file: ${file.url}`);
-      const statusMsg = await message.reply("⏳ Restoring server (stall-proof mode)...");
+      const statusMsg = await message.reply("⏳ Downloading backup and rebuilding server...");
 
       try {
-        const response = await fetch(file.url);
-        if (!response.ok) throw new Error(`HTTP error ${response.status}`);
-        const snapshot = await response.json();
+        const res = await fetch(file.url);
+        const text = await res.text();
+        const snapshot = JSON.parse(text);
 
         const guild = message.guild;
         let createdRoles = 0;
         let createdChannels = 0;
         let restoredEmbeds = 0;
 
-        const existingRoles = await guild.roles.fetch();
-        const existingChannels = await guild.channels.fetch();
+        console.log(`[RESTORE] Snapshot loaded for: ${snapshot.guildName}`);
 
-        // 1. Restore Roles
+        // Fetch current server state once
+        let currentRoles = await guild.roles.fetch();
+        let currentChannels = await guild.channels.fetch();
+
+        // ------------------------------------------
+        // STEP 1: Rebuild Roles
+        // ------------------------------------------
         if (snapshot.roles && Array.isArray(snapshot.roles)) {
           for (const r of snapshot.roles) {
             try {
-              const match = existingRoles.find((ex) => ex.name.toLowerCase() === r.name.toLowerCase());
-              if (!match) {
-                console.log(`[RESTORE ROLE] Creating: ${r.name}`);
-                await withTimeout(
+              if (r.name === "@everyone") continue;
+              const exists = currentRoles.some((ex) => normalizeName(ex.name) === normalizeName(r.name));
+
+              if (!exists) {
+                console.log(`[ROLE] Creating: ${r.name}`);
+                await timeoutPromise(
                   guild.roles.create({
                     name: r.name,
                     color: r.color,
                     hoist: r.hoist,
                     mentionable: r.mentionable,
                     permissions: BigInt(r.permissions),
-                    reason: "Restored from backup"
+                    reason: "Full server restore"
                   }),
-                  3500
+                  4000
                 );
                 createdRoles++;
-                await new Promise((res) => setTimeout(res, 350));
-              } else {
-                console.log(`[RESTORE ROLE] Skipping existing: ${r.name}`);
+                await new Promise((resolve) => setTimeout(resolve, 350));
               }
             } catch (err) {
-              console.error(`[ROLE ERROR] ${r.name}:`, err.message);
+              console.warn(`[ROLE WARN] Skipping role ${r.name}: ${err.message}`);
             }
           }
         }
 
-        // 2. Restore Categories
-        const categoryMap = new Map();
+        // ------------------------------------------
+        // STEP 2: Rebuild Categories
+        // ------------------------------------------
+        currentChannels = await guild.channels.fetch();
+        const categoryMap = new Map(); // normalized category name -> channel ID
+
         const categories = (snapshot.channels || []).filter((c) => c.type === ChannelType.GuildCategory);
         for (const cat of categories) {
           try {
-            let catObj = existingChannels.find(
-              (c) => c && c.type === ChannelType.GuildCategory && c.name.toLowerCase() === cat.name.toLowerCase()
+            const normCatName = normalizeName(cat.name);
+            let catObj = currentChannels.find(
+              (c) => c && c.type === ChannelType.GuildCategory && normalizeName(c.name) === normCatName
             );
+
             if (!catObj) {
-              console.log(`[RESTORE CATEGORY] Creating: ${cat.name}`);
-              catObj = await withTimeout(
+              console.log(`[CAT] Creating Category: ${cat.name}`);
+              catObj = await timeoutPromise(
                 guild.channels.create({
                   name: cat.name,
                   type: ChannelType.GuildCategory,
-                  reason: "Restored from backup"
+                  reason: "Full server restore"
                 }),
-                3500
+                4000
               );
               createdChannels++;
-              await new Promise((res) => setTimeout(res, 350));
-            } else {
-              console.log(`[RESTORE CATEGORY] Skipping existing: ${cat.name}`);
+              await new Promise((resolve) => setTimeout(resolve, 350));
             }
-            categoryMap.set(cat.name.toLowerCase(), catObj.id);
+            categoryMap.set(normCatName, catObj.id);
           } catch (err) {
-            console.error(`[CAT ERROR] ${cat.name}:`, err.message);
+            console.warn(`[CAT WARN] Category ${cat.name}: ${err.message}`);
           }
         }
 
-        // 3. Restore Channels (Forcing Announcement channels to GuildText to prevent Community errors)
+        // ------------------------------------------
+        // STEP 3: Rebuild Channels
+        // ------------------------------------------
+        currentChannels = await guild.channels.fetch();
         const normalChannels = (snapshot.channels || []).filter((c) => c.type !== ChannelType.GuildCategory);
+
         for (const ch of normalChannels) {
           try {
-            let chObj = existingChannels.find(
-              (c) => c && c.name.toLowerCase() === ch.name.toLowerCase()
+            const normChName = normalizeName(ch.name);
+            let chObj = currentChannels.find(
+              (c) => c && c.type !== ChannelType.GuildCategory && normalizeName(c.name) === normChName
             );
-            const parentId = ch.parentName ? categoryMap.get(ch.parentName.toLowerCase()) : null;
+
+            const parentId = ch.parentName ? categoryMap.get(normalizeName(ch.parentName)) : null;
 
             if (!chObj) {
-              // Convert Announcement (5) to standard Text (0) automatically
+              // Convert GuildAnnouncement (type 5) to GuildText (type 0) to avoid Community rejection
               const safeType = ch.type === ChannelType.GuildAnnouncement ? ChannelType.GuildText : ch.type;
-              
-              console.log(`[RESTORE CHANNEL] Creating #${ch.name} (Type: ${safeType})`);
-              
-              await withTimeout(
+              console.log(`[CHANNEL] Creating #${ch.name}`);
+
+              chObj = await timeoutPromise(
                 guild.channels.create({
                   name: ch.name,
                   type: safeType,
                   topic: ch.topic || undefined,
-                  nsfw: ch.nsfw,
-                  rateLimitPerUser: ch.rateLimitPerUser,
+                  nsfw: ch.nsfw || false,
+                  rateLimitPerUser: ch.rateLimitPerUser || 0,
                   parent: parentId || undefined,
-                  reason: "Restored from backup"
+                  reason: "Full server restore"
                 }),
-                3500
+                4000
               );
 
               createdChannels++;
-              await new Promise((res) => setTimeout(res, 350));
-            } else {
-              console.log(`[RESTORE CHANNEL] Skipping existing: #${ch.name}`);
-              if (parentId && chObj.parentId !== parentId) {
-                await chObj.setParent(parentId).catch(() => {});
-              }
+              await new Promise((resolve) => setTimeout(resolve, 350));
+            } else if (parentId && chObj.parentId !== parentId) {
+              await chObj.setParent(parentId).catch(() => {});
             }
           } catch (err) {
-            console.error(`[CH ERROR SKIPPED] #${ch.name}:`, err.message);
+            console.warn(`[CHANNEL WARN] Skipping #${ch.name}: ${err.message}`);
           }
         }
 
-        // 4. Restore Custom Embeds
-        const updatedChannels = await guild.channels.fetch();
+        // ------------------------------------------
+        // STEP 4: Restore All Custom Embeds
+        // ------------------------------------------
+        console.log(`[EMBEDS] Starting embed restoration...`);
+        const freshChannels = await guild.channels.fetch();
+
         if (snapshot.embeds && Array.isArray(snapshot.embeds)) {
           for (const item of snapshot.embeds) {
             try {
-              const targetChannel = updatedChannels.find(
-                (c) => c && (c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement) && c.name.toLowerCase() === item.channelName.toLowerCase()
+              const targetChannel = freshChannels.find(
+                (c) =>
+                  c &&
+                  (c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement) &&
+                  normalizeName(c.name) === normalizeName(item.channelName)
               );
-              if (!targetChannel) continue;
+
+              if (!targetChannel) {
+                console.log(`[SKIP EMBED] Target channel #${item.channelName} could not be matched.`);
+                continue;
+              }
 
               for (const embedData of item.embeds) {
-                const embed = new EmbedBuilder(embedData);
-                await withTimeout(targetChannel.send({ embeds: [embed] }), 3500);
-                restoredEmbeds++;
-                console.log(`[RESTORE EMBED] Posted to #${item.channelName}`);
-                await new Promise((res) => setTimeout(res, 500));
+                try {
+                  const embed = new EmbedBuilder(embedData);
+                  await timeoutPromise(targetChannel.send({ embeds: [embed] }), 4000);
+                  restoredEmbeds++;
+                  console.log(`[EMBED OK] Posted embed into #${targetChannel.name}`);
+                  await new Promise((resolve) => setTimeout(resolve, 600));
+                } catch (e) {
+                  console.warn(`[EMBED FAILED] In #${targetChannel.name}: ${e.message}`);
+                }
               }
             } catch (err) {
-              console.error(`[EMBED ERROR] #${item.channelName}:`, err.message);
+              console.error(`[EMBED ERROR] In #${item.channelName}:`, err.message);
             }
           }
         }
 
+        console.log(`[RESTORE FINISHED] Success! Roles: ${createdRoles}, Channels: ${createdChannels}, Embeds: ${restoredEmbeds}`);
+
         await statusMsg.edit(
-          `✅ **Server Rebuild Complete!**\n• Roles added: **${createdRoles}**\n• Channels added: **${createdChannels}**\n• Embeds re-posted: **${restoredEmbeds}**`
+          `✅ **Full Server Recovery Complete!**\n• Roles verified/added: **${createdRoles}**\n• Channels & Categories created: **${createdChannels}**\n• Embeds re-posted: **${restoredEmbeds}**`
         );
       } catch (err) {
-        console.error("[RESTORE CRITICAL ERROR]:", err);
-        await statusMsg.edit(`❌ Critical error: ${err.message}`);
+        console.error("[CRITICAL RESTORE FAILURE]:", err);
+        await statusMsg.edit(`❌ Critical restore failure: ${err.message}`);
       }
       return;
     }
@@ -627,4 +615,3 @@ process.on("uncaughtException", (error) => {
 });
 
 client.login(TOKEN);
-
