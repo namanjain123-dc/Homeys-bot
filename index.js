@@ -1,6 +1,7 @@
 const {
   Client,
   GatewayIntentBits,
+  Partials,
   AuditLogEvent,
   EmbedBuilder
 } = require("discord.js");
@@ -8,10 +9,7 @@ const {
 const TOKEN = process.env.DISCORD_TOKEN;
 const ROLE_NAME = "homeys";
 const COOLDOWN = 60 * 60 * 1000; // 1 hour in ms
-
-// --- Channel Configuration ---
 const LOG_CHANNEL_NAME = "ping-logs";
-const LOG_CHANNEL_ID = ""; 
 
 const client = new Client({
   intents: [
@@ -19,70 +17,101 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMembers
-  ]
+  ],
+  partials: [Partials.Message, Partials.Channel]
 });
 
 let lastPingTime = 0;
 const botDeletedMessageIds = new Set();
 
-client.on("ready", () => {
+// Dedicated message cache to guarantee ghost pings are never lost
+const messageCache = new Map();
+
+client.on("ready", async () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
-// Helper: Resolve the ping-logs channel
-function getLogChannel(guild, fallbackChannel) {
-  if (LOG_CHANNEL_ID) {
-    const ch = guild.channels.cache.get(LOG_CHANNEL_ID);
-    if (ch) return ch;
-  }
-  if (LOG_CHANNEL_NAME) {
-    const ch = guild.channels.cache.find(
-      (c) => c.name.toLowerCase() === LOG_CHANNEL_NAME.toLowerCase()
+// Helper: Fetch #ping-logs directly from Discord's API
+async function getLogChannel(guild, fallbackChannel) {
+  try {
+    const channels = await guild.channels.fetch();
+    const target = channels.find(
+      (c) => c && c.name.toLowerCase() === LOG_CHANNEL_NAME.toLowerCase()
     );
-    if (ch) return ch;
+    if (target) return target;
+  } catch (err) {
+    console.error("Error fetching channels:", err);
   }
   return fallbackChannel;
 }
 
-// Helper: Ban user safely and route log to #ping-logs
+// Helper: Ban user safely and route confirmation to #ping-logs
 async function enforceBan(guild, user, reason, triggerChannel) {
-  const logChannel = getLogChannel(guild, triggerChannel);
+  const logChannel = await getLogChannel(guild, triggerChannel);
 
   try {
     const member = await guild.members.fetch(user.id).catch(() => null);
     if (!member) {
       await guild.bans.create(user.id, { reason });
       if (logChannel) {
-        logChannel.send(`🔨 **Banned** <@${user.id}> | **Reason:** ${reason}`);
+        await logChannel.send(`🔨 **Banned** <@${user.id}> | **Reason:** ${reason}`);
       }
       return;
     }
 
     if (!member.bannable) {
       if (logChannel) {
-        logChannel.send(`❌ Cannot ban <@${user.id}>: Member outranks the bot or holds Admin immunity.`);
+        await logChannel.send(`❌ Cannot ban <@${user.id}>: Member outranks the bot or holds Admin immunity.`);
       }
       return;
     }
 
     await member.ban({ reason });
     if (logChannel) {
-      logChannel.send(`🔨 **Banned** <@${user.id}> | **Reason:** ${reason}`);
+      await logChannel.send(`🔨 **Banned** <@${user.id}> | **Reason:** ${reason}`);
     }
   } catch (err) {
     console.error(`Failed to ban user ${user.id}:`, err);
     if (logChannel) {
-      logChannel.send(`❌ Failed to ban <@${user.id}> due to missing permissions.`);
+      await logChannel.send(`❌ Failed to ban <@${user.id}> due to missing permissions.`);
     }
   }
 }
 
-// --- 1. Cooldown & Instant Ban Handler ---
+// --- Message Handler (Caching & Cooldown/Ban Logic) ---
 client.on("messageCreate", async (message) => {
   try {
     if (!message.guild) return;
 
-    // Detect if @homeys is mentioned
+    // Cache incoming human messages for ghost ping detection (kept for 15 minutes)
+    if (!message.author.bot) {
+      const pingList = [];
+
+      if (message.mentions.roles.size > 0) {
+        message.mentions.roles.forEach((r) => pingList.push(`@${r.name}`));
+      }
+      if (message.mentions.users.size > 0) {
+        message.mentions.users
+          .filter((u) => u.id !== message.author.id)
+          .forEach((u) => pingList.push(`<@${u.id}>`));
+      }
+      if (message.mentions.everyone) {
+        pingList.push("@everyone / @here");
+      }
+
+      messageCache.set(message.id, {
+        authorId: message.author.id,
+        authorTag: message.author.tag,
+        channelId: message.channel.id,
+        content: message.content,
+        mentions: pingList
+      });
+
+      // Clear from memory after 15 minutes
+      setTimeout(() => messageCache.delete(message.id), 15 * 60 * 1000);
+    }
+
+    // --- Cooldown check for @homeys ---
     const hasRolePing = message.mentions.roles.some(
       (role) => role.name.toLowerCase() === ROLE_NAME.toLowerCase()
     );
@@ -92,22 +121,22 @@ client.on("messageCreate", async (message) => {
     const now = Date.now();
     const timeSinceLastPing = now - lastPingTime;
 
-    // Allowed ping
+    // Ping allowed: resets cooldown
     if (timeSinceLastPing >= COOLDOWN) {
       lastPingTime = now;
       console.log(`@${ROLE_NAME} ping allowed.`);
       return;
     }
 
-    // Cooldown violation: delete the offending ping instantly
+    // Violation: ignore in ghost ping catcher and delete
     botDeletedMessageIds.add(message.id);
+    messageCache.delete(message.id);
     setTimeout(() => botDeletedMessageIds.delete(message.id), 30000);
     await message.delete().catch(() => {});
 
-    // Case A: Webhook ping
+    // Webhook violation
     if (message.webhookId) {
       await new Promise((r) => setTimeout(r, 1200));
-
       const auditLogs = await message.guild.fetchAuditLogs({
         limit: 5,
         type: AuditLogEvent.WebhookCreate
@@ -116,9 +145,7 @@ client.on("messageCreate", async (message) => {
       let creator = null;
       if (auditLogs) {
         const entry = auditLogs.entries.find((e) => e.target?.id === message.webhookId);
-        if (entry && entry.executor) {
-          creator = entry.executor;
-        }
+        if (entry && entry.executor) creator = entry.executor;
       }
 
       if (creator) {
@@ -129,13 +156,13 @@ client.on("messageCreate", async (message) => {
           message.channel
         );
       } else {
-        const targetLog = getLogChannel(message.guild, message.channel);
-        targetLog.send(`⚠️ Webhook ping blocked during cooldown. (Creator not found in recent audit logs).`);
+        const targetLog = await getLogChannel(message.guild, message.channel);
+        await targetLog.send(`⚠️ Webhook ping blocked during cooldown. (Creator not found in recent audit logs).`);
       }
       return;
     }
 
-    // Case B: Another bot ping
+    // Bot violation
     if (message.author.bot) {
       if (message.author.id === client.user.id) return;
       await enforceBan(
@@ -147,7 +174,7 @@ client.on("messageCreate", async (message) => {
       return;
     }
 
-    // Case C: Standard Member ping violation -> Direct Ban
+    // Member violation -> Direct Ban
     await enforceBan(
       message.guild,
       message.author,
@@ -159,46 +186,57 @@ client.on("messageCreate", async (message) => {
   }
 });
 
-// --- 2. Ghost Ping Catcher (Sent directly to #ping-logs) ---
+// --- Ghost Ping Catcher (Routed directly to #ping-logs) ---
 client.on("messageDelete", async (message) => {
   try {
-    if (!message || !message.author || message.author.bot) return;
     if (botDeletedMessageIds.has(message.id)) return;
 
-    const pingList = [];
+    // Check our dedicated cache first
+    let cached = messageCache.get(message.id);
 
-    // Collect role mentions
-    if (message.mentions.roles && message.mentions.roles.size > 0) {
-      message.mentions.roles.forEach((r) => pingList.push(`@${r.name}`));
+    // Fallback to discord.js structure if present
+    if (!cached && message && message.author && !message.author.bot) {
+      const pingList = [];
+      if (message.mentions.roles?.size > 0) message.mentions.roles.forEach((r) => pingList.push(`@${r.name}`));
+      if (message.mentions.users?.size > 0) {
+        message.mentions.users.filter((u) => u.id !== message.author.id).forEach((u) => pingList.push(`<@${u.id}>`));
+      }
+      if (message.mentions.everyone) pingList.push("@everyone / @here");
+
+      if (pingList.length > 0) {
+        cached = {
+          authorId: message.author.id,
+          authorTag: message.author.tag,
+          channelId: message.channel.id,
+          content: message.content,
+          mentions: pingList
+        };
+      }
     }
 
-    // Collect user/member mentions (skips self mentions)
-    if (message.mentions.users && message.mentions.users.size > 0) {
-      message.mentions.users
-        .filter((u) => u.id !== message.author.id)
-        .forEach((u) => pingList.push(`<@${u.id}>`));
-    }
+    if (!cached || !cached.mentions || cached.mentions.length === 0) return;
 
-    // Collect @everyone / @here mentions
-    if (message.mentions.everyone) {
-      pingList.push("@everyone / @here");
-    }
+    // Clean up cache entry
+    messageCache.delete(message.id);
 
-    if (pingList.length > 0) {
-      const targetLogChannel = getLogChannel(message.guild, message.channel);
+    const targetLogChannel = await getLogChannel(message.guild, message.channel);
+    if (!targetLogChannel) return;
 
-      const embed = new EmbedBuilder()
-        .setColor(0xff3344)
-        .setTitle("👻 Ghost Ping Detected")
-        .setDescription(`**Author:** <@${message.author.id}> (${message.author.tag})\n**Origin Channel:** <#${message.channel.id}>\n**Mentioned:** ${pingList.join(", ")}`)
-        .addFields({
-          name: "Original Message Content",
-          value: message.content && message.content.length > 0 ? message.content : "*[No text / media only]*"
-        })
-        .setTimestamp();
+    const embed = new EmbedBuilder()
+      .setColor(0xff3344)
+      .setTitle("👻 Ghost Ping Detected")
+      .setDescription(
+        `**Author:** <@${cached.authorId}> (${cached.authorTag})\n` +
+        `**Origin Channel:** <#${cached.channelId}>\n` +
+        `**Mentioned:** ${cached.mentions.join(", ")}`
+      )
+      .addFields({
+        name: "Original Message Content",
+        value: cached.content && cached.content.trim().length > 0 ? cached.content : "*[No text / media only]*"
+      })
+      .setTimestamp();
 
-      await targetLogChannel.send({ embeds: [embed] });
-    }
+    await targetLogChannel.send({ embeds: [embed] });
   } catch (error) {
     console.error("Error handling messageDelete:", error);
   }
