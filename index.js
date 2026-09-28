@@ -17,10 +17,10 @@ const COOLDOWN = 60 * 60 * 1000; // 1 hour in ms
 // Dedicated Channel ID for #ping-logs
 const LOG_CHANNEL_ID = "1554030875585421342";
 
-// Bots to IGNORE completely during embed backups (OwO, Pokétwo, Mudae, Dank Memer, etc.)
+// Game/Spam bot IDs to exclude from backups
 const IGNORED_BOT_IDS = [
   "408785106942164992", // OwO Bot
-  "854227910977716234", // OwO secondary ID
+  "854227910977716234", // OwO secondary
   "270904126974590976", // Dank Memer
   "664588538202423307", // Pokétwo
   "432610292342587392"  // Mudae
@@ -102,14 +102,13 @@ client.on("messageCreate", async (message) => {
   try {
     if (!message.guild) return;
 
-    // --- Command: !backupserver (Full Server Architecture + Clean Filtered Embeds) ---
-    // You can do: `!backupserver` OR specify channels like: `!backupserver #rules #announcements #info`
+    // --- Command: !backupserver (Full Server Architecture + Clean Embeds) ---
     if (message.content.trim().toLowerCase().startsWith("!backupserver")) {
       if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
         return message.reply("❌ Only administrators can run this command.");
       }
 
-      const statusMsg = await message.reply("⏳ Creating clean server snapshot (excluding bot spam & OwO)...");
+      const statusMsg = await message.reply("⏳ Creating clean server snapshot...");
 
       try {
         const guild = message.guild;
@@ -167,7 +166,6 @@ client.on("messageCreate", async (message) => {
         if (message.mentions.channels.size > 0) {
           channelsToScan = Array.from(message.mentions.channels.values());
         } else {
-          // If no channels mentioned, ignore known chatter/spam channels automatically
           channelsToScan = Array.from(
             channels.filter((c) => {
               if (!c || (c.type !== ChannelType.GuildText && c.type !== ChannelType.GuildAnnouncement)) return false;
@@ -181,11 +179,9 @@ client.on("messageCreate", async (message) => {
           try {
             const msgs = await ch.messages.fetch({ limit: 100 });
             msgs.forEach((m) => {
-              // Exclude OwO and other game bots
               if (IGNORED_BOT_IDS.includes(m.author.id)) return;
               if (m.author.username && m.author.username.toLowerCase().includes("owo")) return;
 
-              // Only accept embeds created by server bots or webhooks
               if ((m.author.bot || m.webhookId) && m.embeds && m.embeds.length > 0) {
                 const richEmbeds = m.embeds.filter(
                   (e) => (e.title || e.description || e.fields?.length) && !e.url?.includes("tenor.com")
@@ -215,7 +211,7 @@ client.on("messageCreate", async (message) => {
         const attachment = new AttachmentBuilder(buffer, { name: "server-full-backup.json" });
 
         await statusMsg.edit({
-          content: `✅ **Clean Server Snapshot Complete!**\n• Roles: **${roleData.length}**\n• Channels & Categories: **${channelData.length}**\n• Clean Server Embeds: **${embedData.length}**\n\n(All OwO / bot spam embeds and chatting channels excluded). Keep this file safe!`,
+          content: `✅ **Clean Server Snapshot Complete!**\n• Roles: **${roleData.length}**\n• Channels & Categories: **${channelData.length}**\n• Clean Server Embeds: **${embedData.length}**\n\nRun \`!restoreserver\` with this attached file whenever you need to restore.`,
           files: [attachment]
         });
       } catch (err) {
@@ -225,7 +221,7 @@ client.on("messageCreate", async (message) => {
       return;
     }
 
-    // --- Command: !restoreserver (Full Server Recovery) ---
+    // --- Command: !restoreserver (Full Server Recovery with Live Logging) ---
     if (message.content.trim().toLowerCase().startsWith("!restoreserver")) {
       if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
         return message.reply("❌ Only administrators can run this command.");
@@ -237,6 +233,7 @@ client.on("messageCreate", async (message) => {
       }
 
       const statusMsg = await message.reply("⏳ Reading backup and reconstructing server structure...");
+      console.log("[RESTORE START] Beginning server reconstruction process...");
 
       try {
         const snapshot = await downloadJson(file.url);
@@ -247,12 +244,14 @@ client.on("messageCreate", async (message) => {
         let restoredEmbeds = 0;
 
         // 1. Restore Roles
+        console.log(`[RESTORE] Step 1: Processing ${snapshot.roles?.length || 0} roles...`);
         const existingRoles = await guild.roles.fetch();
         if (snapshot.roles && Array.isArray(snapshot.roles)) {
           for (const r of snapshot.roles) {
             try {
               let existing = existingRoles.find((ex) => ex.name.toLowerCase() === r.name.toLowerCase());
               if (!existing) {
+                console.log(`[RESTORE ROLE] Creating missing role: @${r.name}`);
                 await guild.roles.create({
                   name: r.name,
                   color: r.color,
@@ -262,15 +261,18 @@ client.on("messageCreate", async (message) => {
                   reason: "Restored from server backup"
                 });
                 createdRoles++;
-                await new Promise((res) => setTimeout(res, 300));
+                await new Promise((res) => setTimeout(res, 400));
+              } else {
+                console.log(`[RESTORE ROLE] Skipping @${r.name} (already exists)`);
               }
             } catch (err) {
-              console.error(`Failed restoring role ${r.name}:`, err.message);
+              console.error(`[RESTORE ERROR] Could not create role @${r.name}: ${err.message}`);
             }
           }
         }
 
         // 2. Restore Categories First
+        console.log(`[RESTORE] Step 2: Processing categories...`);
         const existingChannels = await guild.channels.fetch();
         const categoryMap = new Map();
 
@@ -281,21 +283,25 @@ client.on("messageCreate", async (message) => {
               (c) => c && c.type === ChannelType.GuildCategory && c.name.toLowerCase() === cat.name.toLowerCase()
             );
             if (!existingCat) {
+              console.log(`[RESTORE CATEGORY] Creating category: [${cat.name}]`);
               existingCat = await guild.channels.create({
                 name: cat.name,
                 type: ChannelType.GuildCategory,
                 reason: "Restored category from backup"
               });
               createdChannels++;
-              await new Promise((res) => setTimeout(res, 300));
+              await new Promise((res) => setTimeout(res, 400));
+            } else {
+              console.log(`[RESTORE CATEGORY] Skipping category [${cat.name}] (already exists)`);
             }
             categoryMap.set(cat.name.toLowerCase(), existingCat.id);
           } catch (err) {
-            console.error(`Failed recreating category ${cat.name}:`, err.message);
+            console.error(`[RESTORE ERROR] Could not create category [${cat.name}]: ${err.message}`);
           }
         }
 
         // 3. Restore Channels & Settings
+        console.log(`[RESTORE] Step 3: Processing channels...`);
         const normalChannels = (snapshot.channels || []).filter((c) => c.type !== ChannelType.GuildCategory);
         const activeChannels = await guild.channels.fetch();
 
@@ -308,6 +314,7 @@ client.on("messageCreate", async (message) => {
             const parentId = ch.parentName ? categoryMap.get(ch.parentName.toLowerCase()) : null;
 
             if (!existingCh) {
+              console.log(`[RESTORE CHANNEL] Creating channel: #${ch.name}`);
               existingCh = await guild.channels.create({
                 name: ch.name,
                 type: ch.type,
@@ -318,16 +325,20 @@ client.on("messageCreate", async (message) => {
                 reason: "Restored channel from backup"
               });
               createdChannels++;
-              await new Promise((res) => setTimeout(res, 300));
-            } else if (parentId && existingCh.parentId !== parentId) {
-              await existingCh.setParent(parentId).catch(() => {});
+              await new Promise((res) => setTimeout(res, 400));
+            } else {
+              console.log(`[RESTORE CHANNEL] Skipping #${ch.name} (already exists)`);
+              if (parentId && existingCh.parentId !== parentId) {
+                await existingCh.setParent(parentId).catch(() => {});
+              }
             }
           } catch (err) {
-            console.error(`Failed recreating channel ${ch.name}:`, err.message);
+            console.error(`[RESTORE ERROR] Could not create channel #${ch.name}: ${err.message}`);
           }
         }
 
         // 4. Restore Verified Custom Embeds
+        console.log(`[RESTORE] Step 4: Re-posting embeds...`);
         const refreshedChannels = await guild.channels.fetch();
         if (snapshot.embeds && Array.isArray(snapshot.embeds)) {
           for (const item of snapshot.embeds) {
@@ -335,26 +346,31 @@ client.on("messageCreate", async (message) => {
               const targetChannel = refreshedChannels.find(
                 (c) => c && (c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement) && c.name.toLowerCase() === item.channelName.toLowerCase()
               );
-              if (!targetChannel) continue;
+              if (!targetChannel) {
+                console.log(`[RESTORE EMBED] Could not find target channel #${item.channelName}`);
+                continue;
+              }
 
               for (const embedData of item.embeds) {
+                console.log(`[RESTORE EMBED] Posting embed in #${item.channelName}`);
                 const embed = new EmbedBuilder(embedData);
                 await targetChannel.send({ embeds: [embed] });
                 restoredEmbeds++;
-                await new Promise((res) => setTimeout(res, 500));
+                await new Promise((res) => setTimeout(res, 600));
               }
             } catch (err) {
-              console.error(`Failed restoring embeds to #${item.channelName}:`, err.message);
+              console.error(`[RESTORE ERROR] Failed posting embed to #${item.channelName}: ${err.message}`);
             }
           }
         }
 
+        console.log("[RESTORE COMPLETE] All operations finished.");
         await statusMsg.edit(
           `✅ **Server Rebuild Complete!**\n• Roles restored/verified: **${createdRoles}**\n• Channels & categories restored: **${createdChannels}**\n• Embeds re-posted: **${restoredEmbeds}**`
         );
       } catch (err) {
-        console.error("Server restoration failed:", err);
-        await statusMsg.edit("❌ Failed restoring server. Ensure bot has Administrator rights.");
+        console.error("[RESTORE CRITICAL ERROR]:", err);
+        await statusMsg.edit("❌ Failed restoring server. Ensure bot role is at the top of the role list with Administrator rights.");
       }
       return;
     }
@@ -383,7 +399,6 @@ client.on("messageCreate", async (message) => {
           content: message.content,
           mentions: pingList
         });
-        console.log(`[CACHED PING] Message ${message.id} by ${message.author.tag} contains: ${pingList.join(", ")}`);
         setTimeout(() => messageCache.delete(message.id), 15 * 60 * 1000);
       }
     }
@@ -459,12 +474,7 @@ client.on("messageCreate", async (message) => {
 // --- 2. Ghost Ping Catcher ---
 client.on("messageDelete", async (message) => {
   try {
-    console.log(`[DELETE EVENT] Message deleted: ${message.id}`);
-
-    if (botDeletedMessageIds.has(message.id)) {
-      console.log(`[DELETE IGNORED] Message was deleted by bot moderation.`);
-      return;
-    }
+    if (botDeletedMessageIds.has(message.id)) return;
 
     let cached = messageCache.get(message.id);
 
@@ -487,10 +497,7 @@ client.on("messageDelete", async (message) => {
       }
     }
 
-    if (!cached || !cached.mentions || cached.mentions.length === 0) {
-      console.log(`[DELETE IGNORED] Deleted message had no tracked pings or wasn't cached.`);
-      return;
-    }
+    if (!cached || !cached.mentions || cached.mentions.length === 0) return;
 
     messageCache.delete(message.id);
 
@@ -499,10 +506,7 @@ client.on("messageDelete", async (message) => {
       return null;
     });
 
-    if (!targetLogChannel) {
-      console.error(`[ERROR] No valid log channel found to send embed!`);
-      return;
-    }
+    if (!targetLogChannel) return;
 
     const embed = new EmbedBuilder()
       .setColor(0xff3344)
@@ -519,7 +523,6 @@ client.on("messageDelete", async (message) => {
       .setTimestamp();
 
     await targetLogChannel.send({ embeds: [embed] });
-    console.log(`[SUCCESS] Ghost ping embed posted in #${targetLogChannel.name}`);
   } catch (error) {
     console.error("Error handling messageDelete:", error);
   }
