@@ -9,7 +9,9 @@ const {
 const TOKEN = process.env.DISCORD_TOKEN;
 const ROLE_NAME = "homeys";
 const COOLDOWN = 60 * 60 * 1000; // 1 hour in ms
-const LOG_CHANNEL_NAME = "ping-logs";
+
+// Dedicated Channel ID for #ping-logs
+const LOG_CHANNEL_ID = "1554030875585421342";
 
 const client = new Client({
   intents: [
@@ -23,67 +25,54 @@ const client = new Client({
 
 let lastPingTime = 0;
 const botDeletedMessageIds = new Set();
-
-// Dedicated message cache to guarantee ghost pings are never lost
 const messageCache = new Map();
 
 client.on("ready", async () => {
-  console.log(`Logged in as ${client.user.tag}`);
+  console.log(`[BOT READY] Logged in as ${client.user.tag}`);
+
+  try {
+    const ch = await client.channels.fetch(LOG_CHANNEL_ID);
+    console.log(`[CHANNEL OK] Connected to target log channel: #${ch.name}`);
+  } catch (e) {
+    console.error(`[CHANNEL ERROR] Could not access channel ID ${LOG_CHANNEL_ID}:`, e.message);
+  }
 });
 
-// Helper: Fetch #ping-logs directly from Discord's API
-async function getLogChannel(guild, fallbackChannel) {
-  try {
-    const channels = await guild.channels.fetch();
-    const target = channels.find(
-      (c) => c && c.name.toLowerCase() === LOG_CHANNEL_NAME.toLowerCase()
-    );
-    if (target) return target;
-  } catch (err) {
-    console.error("Error fetching channels:", err);
-  }
-  return fallbackChannel;
-}
-
-// Helper: Ban user safely and route confirmation to #ping-logs
+// Helper: Ban user safely
 async function enforceBan(guild, user, reason, triggerChannel) {
-  const logChannel = await getLogChannel(guild, triggerChannel);
+  let logChannel = null;
+  try {
+    logChannel = await client.channels.fetch(LOG_CHANNEL_ID).catch(() => null);
+  } catch (e) {}
+  if (!logChannel) logChannel = triggerChannel;
 
   try {
     const member = await guild.members.fetch(user.id).catch(() => null);
     if (!member) {
       await guild.bans.create(user.id, { reason });
-      if (logChannel) {
-        await logChannel.send(`🔨 **Banned** <@${user.id}> | **Reason:** ${reason}`);
-      }
+      if (logChannel) logChannel.send(`🔨 **Banned** <@${user.id}> | **Reason:** ${reason}`);
       return;
     }
 
     if (!member.bannable) {
-      if (logChannel) {
-        await logChannel.send(`❌ Cannot ban <@${user.id}>: Member outranks the bot or holds Admin immunity.`);
-      }
+      if (logChannel) logChannel.send(`❌ Cannot ban <@${user.id}>: Member outranks bot or holds Admin immunity.`);
       return;
     }
 
     await member.ban({ reason });
-    if (logChannel) {
-      await logChannel.send(`🔨 **Banned** <@${user.id}> | **Reason:** ${reason}`);
-    }
+    if (logChannel) logChannel.send(`🔨 **Banned** <@${user.id}> | **Reason:** ${reason}`);
   } catch (err) {
     console.error(`Failed to ban user ${user.id}:`, err);
-    if (logChannel) {
-      await logChannel.send(`❌ Failed to ban <@${user.id}> due to missing permissions.`);
-    }
+    if (logChannel) logChannel.send(`❌ Failed to ban <@${user.id}> due to missing permissions.`);
   }
 }
 
-// --- Message Handler (Caching & Cooldown/Ban Logic) ---
+// --- 1. Message Create (Cache + Cooldown/Ban) ---
 client.on("messageCreate", async (message) => {
   try {
     if (!message.guild) return;
 
-    // Cache incoming human messages for ghost ping detection (kept for 15 minutes)
+    // Cache incoming human messages for ghost pings
     if (!message.author.bot) {
       const pingList = [];
 
@@ -99,19 +88,20 @@ client.on("messageCreate", async (message) => {
         pingList.push("@everyone / @here");
       }
 
-      messageCache.set(message.id, {
-        authorId: message.author.id,
-        authorTag: message.author.tag,
-        channelId: message.channel.id,
-        content: message.content,
-        mentions: pingList
-      });
-
-      // Clear from memory after 15 minutes
-      setTimeout(() => messageCache.delete(message.id), 15 * 60 * 1000);
+      if (pingList.length > 0) {
+        messageCache.set(message.id, {
+          authorId: message.author.id,
+          authorTag: message.author.tag,
+          channelId: message.channel.id,
+          content: message.content,
+          mentions: pingList
+        });
+        console.log(`[CACHED PING] Message ${message.id} by ${message.author.tag} contains: ${pingList.join(", ")}`);
+        setTimeout(() => messageCache.delete(message.id), 15 * 60 * 1000);
+      }
     }
 
-    // --- Cooldown check for @homeys ---
+    // Cooldown check for @homeys
     const hasRolePing = message.mentions.roles.some(
       (role) => role.name.toLowerCase() === ROLE_NAME.toLowerCase()
     );
@@ -121,14 +111,12 @@ client.on("messageCreate", async (message) => {
     const now = Date.now();
     const timeSinceLastPing = now - lastPingTime;
 
-    // Ping allowed: resets cooldown
     if (timeSinceLastPing >= COOLDOWN) {
       lastPingTime = now;
       console.log(`@${ROLE_NAME} ping allowed.`);
       return;
     }
 
-    // Violation: ignore in ghost ping catcher and delete
     botDeletedMessageIds.add(message.id);
     messageCache.delete(message.id);
     setTimeout(() => botDeletedMessageIds.delete(message.id), 30000);
@@ -148,17 +136,12 @@ client.on("messageCreate", async (message) => {
         if (entry && entry.executor) creator = entry.executor;
       }
 
-      if (creator) {
-        await enforceBan(
-          message.guild,
-          creator,
-          `Webhook ping exploit: created webhook to ping @${ROLE_NAME} during cooldown`,
-          message.channel
-        );
-      } else {
-        const targetLog = await getLogChannel(message.guild, message.channel);
-        await targetLog.send(`⚠️ Webhook ping blocked during cooldown. (Creator not found in recent audit logs).`);
-      }
+      await enforceBan(
+        message.guild,
+        creator || { id: "Unknown" },
+        `Webhook ping exploit for @${ROLE_NAME} during cooldown`,
+        message.channel
+      );
       return;
     }
 
@@ -168,7 +151,7 @@ client.on("messageCreate", async (message) => {
       await enforceBan(
         message.guild,
         message.author,
-        `Bot ping exploit: invoked to ping @${ROLE_NAME} during cooldown`,
+        `Bot ping exploit for @${ROLE_NAME} during cooldown`,
         message.channel
       );
       return;
@@ -186,15 +169,19 @@ client.on("messageCreate", async (message) => {
   }
 });
 
-// --- Ghost Ping Catcher (Routed directly to #ping-logs) ---
+// --- 2. Ghost Ping Catcher ---
 client.on("messageDelete", async (message) => {
   try {
-    if (botDeletedMessageIds.has(message.id)) return;
+    console.log(`[DELETE EVENT] Message deleted: ${message.id}`);
 
-    // Check our dedicated cache first
+    if (botDeletedMessageIds.has(message.id)) {
+      console.log(`[DELETE IGNORED] Message was deleted by bot moderation.`);
+      return;
+    }
+
     let cached = messageCache.get(message.id);
 
-    // Fallback to discord.js structure if present
+    // Fallback if cached via discord.js
     if (!cached && message && message.author && !message.author.bot) {
       const pingList = [];
       if (message.mentions.roles?.size > 0) message.mentions.roles.forEach((r) => pingList.push(`@${r.name}`));
@@ -214,13 +201,22 @@ client.on("messageDelete", async (message) => {
       }
     }
 
-    if (!cached || !cached.mentions || cached.mentions.length === 0) return;
+    if (!cached || !cached.mentions || cached.mentions.length === 0) {
+      console.log(`[DELETE IGNORED] Deleted message had no tracked pings or wasn't cached.`);
+      return;
+    }
 
-    // Clean up cache entry
     messageCache.delete(message.id);
 
-    const targetLogChannel = await getLogChannel(message.guild, message.channel);
-    if (!targetLogChannel) return;
+    const targetLogChannel = await client.channels.fetch(LOG_CHANNEL_ID).catch((e) => {
+      console.error(`[FETCH FAIL] Could not fetch log channel:`, e.message);
+      return null;
+    });
+
+    if (!targetLogChannel) {
+      console.error(`[ERROR] No valid log channel found to send embed!`);
+      return;
+    }
 
     const embed = new EmbedBuilder()
       .setColor(0xff3344)
@@ -237,6 +233,7 @@ client.on("messageDelete", async (message) => {
       .setTimestamp();
 
     await targetLogChannel.send({ embeds: [embed] });
+    console.log(`[SUCCESS] Ghost ping embed posted in #${targetLogChannel.name}`);
   } catch (error) {
     console.error("Error handling messageDelete:", error);
   }
