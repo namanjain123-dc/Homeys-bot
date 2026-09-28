@@ -3,8 +3,12 @@ const {
   GatewayIntentBits,
   Partials,
   AuditLogEvent,
-  EmbedBuilder
+  EmbedBuilder,
+  AttachmentBuilder,
+  PermissionsBitField,
+  ChannelType
 } = require("discord.js");
+const https = require("https");
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const ROLE_NAME = "homeys";
@@ -67,10 +71,143 @@ async function enforceBan(guild, user, reason, triggerChannel) {
   }
 }
 
-// --- 1. Message Create (Cache + Cooldown/Ban) ---
+// Helper: Download JSON attachment into memory
+function downloadJson(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      let data = "";
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch (err) {
+          reject(err);
+        }
+      });
+    }).on("error", (err) => reject(err));
+  });
+}
+
+// --- 1. Message Create Handler ---
 client.on("messageCreate", async (message) => {
   try {
     if (!message.guild) return;
+
+    // --- Command: !backupembeds (Admin Only) ---
+    if (message.content.trim().toLowerCase() === "!backupembeds") {
+      if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        return message.reply("❌ Only administrators can run this command.");
+      }
+
+      const statusMsg = await message.reply("⏳ Scanning channels and backing up embeds...");
+      const backupData = [];
+
+      try {
+        const channels = await message.guild.channels.fetch();
+        const textChannels = channels.filter(
+          (c) => c && (c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement)
+        );
+
+        for (const [_, channel] of textChannels) {
+          try {
+            const messages = await channel.messages.fetch({ limit: 100 });
+            messages.forEach((msg) => {
+              if (msg.embeds && msg.embeds.length > 0) {
+                backupData.push({
+                  channelId: channel.id,
+                  channelName: channel.name,
+                  channelType: channel.type,
+                  messageId: msg.id,
+                  createdAt: msg.createdAt,
+                  embeds: msg.embeds.map((e) => e.toJSON())
+                });
+              }
+            });
+          } catch (err) {
+            console.error(`Skipping channel #${channel.name}:`, err.message);
+          }
+        }
+
+        const buffer = Buffer.from(JSON.stringify(backupData, null, 2), "utf-8");
+        const attachment = new AttachmentBuilder(buffer, { name: "embeds-backup.json" });
+
+        await statusMsg.edit({
+          content: `✅ Successfully backed up **${backupData.length}** embed messages! If channels ever get deleted, the bot will automatically recreate them by name when you run \`!restoreembeds\`.`,
+          files: [attachment]
+        });
+      } catch (err) {
+        console.error("Backup failed:", err);
+        await statusMsg.edit("❌ Failed to complete backup. Check bot permissions.");
+      }
+      return;
+    }
+
+    // --- Command: !restoreembeds (Admin Only) ---
+    if (message.content.trim().toLowerCase().startsWith("!restoreembeds")) {
+      if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        return message.reply("❌ Only administrators can run this command.");
+      }
+
+      const file = message.attachments.find((att) => att.name.endsWith(".json"));
+      if (!file) {
+        return message.reply("❌ Please upload your `embeds-backup.json` file in the same message with `!restoreembeds`.");
+      }
+
+      const statusMsg = await message.reply("⏳ Reading backup file and restoring embeds...");
+
+      try {
+        const backupData = await downloadJson(file.url);
+        let restoredCount = 0;
+        let createdChannelCount = 0;
+
+        // Fetch current active server channels
+        let currentChannels = await message.guild.channels.fetch();
+
+        for (const item of backupData) {
+          try {
+            // 1. Try to find the channel by original ID
+            let targetChannel = currentChannels.get(item.channelId);
+
+            // 2. If deleted, try finding an existing channel with the same name
+            if (!targetChannel) {
+              targetChannel = currentChannels.find(
+                (c) => c && c.name.toLowerCase() === item.channelName.toLowerCase()
+              );
+            }
+
+            // 3. If completely missing, recreate the channel automatically
+            if (!targetChannel) {
+              targetChannel = await message.guild.channels.create({
+                name: item.channelName,
+                type: item.channelType || ChannelType.GuildText,
+                reason: "Auto-recreated during embed restoration after deletion"
+              });
+              createdChannelCount++;
+              // Refresh channel cache
+              currentChannels = await message.guild.channels.fetch();
+            }
+
+            // Post the embeds into the resolved or recreated channel
+            for (const embedData of item.embeds) {
+              const embed = new EmbedBuilder(embedData);
+              await targetChannel.send({ embeds: [embed] });
+              restoredCount++;
+              await new Promise((r) => setTimeout(r, 600)); // Discord rate-limit safety
+            }
+          } catch (err) {
+            console.error(`Failed restoring embeds for #${item.channelName}:`, err);
+          }
+        }
+
+        await statusMsg.edit(
+          `✅ Restore complete!\n• Re-posted **${restoredCount}** embeds.\n• Auto-recreated **${createdChannelCount}** missing channels.`
+        );
+      } catch (err) {
+        console.error("Restore failed:", err);
+        await statusMsg.edit("❌ Failed to restore embeds. Make sure the uploaded file is a valid JSON backup.");
+      }
+      return;
+    }
 
     // Cache incoming human messages for ghost pings
     if (!message.author.bot) {
@@ -181,7 +318,6 @@ client.on("messageDelete", async (message) => {
 
     let cached = messageCache.get(message.id);
 
-    // Fallback if cached via discord.js
     if (!cached && message && message.author && !message.author.bot) {
       const pingList = [];
       if (message.mentions.roles?.size > 0) message.mentions.roles.forEach((r) => pingList.push(`@${r.name}`));
