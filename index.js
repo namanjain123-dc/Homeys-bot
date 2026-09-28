@@ -48,7 +48,7 @@ let lastPingTime = 0;
 const botDeletedMessageIds = new Set();
 const messageCache = new Map();
 
-client.on("ready", async () => {
+client.on("clientReady", async () => {
   console.log(`[BOT READY] Logged in as ${client.user.tag}`);
 
   try {
@@ -94,6 +94,52 @@ client.on("messageCreate", async (message) => {
     if (!message.guild) return;
 
     // ==========================================
+    // COMMAND: .purge <amount>
+    // ==========================================
+    if (message.content.trim().toLowerCase().startsWith(".purge")) {
+      // Permission check: ManageMessages or Administrator
+      if (
+        !message.member.permissions.has(PermissionsBitField.Flags.ManageMessages) &&
+        !message.member.permissions.has(PermissionsBitField.Flags.Administrator)
+      ) {
+        return message.reply("❌ You need the **Manage Messages** permission to use `.purge`.");
+      }
+
+      const args = message.content.trim().split(/\s+/);
+      const count = parseInt(args[1], 10);
+
+      if (isNaN(count) || count < 1 || count > 100) {
+        return message.reply("❌ Please provide a valid number between **1** and **100**.\n*Example:* `.purge 20`");
+      }
+
+      try {
+        // Delete the command message first
+        await message.delete().catch(() => {});
+
+        // Fetch the messages to purge
+        const fetched = await message.channel.messages.fetch({ limit: count });
+
+        // Add to botDeletedMessageIds so ghost ping alert doesn't fire
+        fetched.forEach((msg) => {
+          botDeletedMessageIds.add(msg.id);
+          messageCache.delete(msg.id);
+          setTimeout(() => botDeletedMessageIds.delete(msg.id), 30000);
+        });
+
+        // Bulk delete
+        const deleted = await message.channel.bulkDelete(fetched, true);
+
+        const confirmMsg = await message.channel.send(`🧹 Successfully purged **${deleted.size}** messages.`);
+        setTimeout(() => confirmMsg.delete().catch(() => {}), 4000);
+      } catch (err) {
+        console.error("Purge Error:", err);
+        message.channel.send("❌ Could not purge messages. (Discord does not permit bulk-deleting messages older than 14 days).")
+          .then((m) => setTimeout(() => m.delete().catch(() => {}), 5000));
+      }
+      return;
+    }
+
+    // ==========================================
     // COMMAND: !backupserver
     // ==========================================
     if (message.content.trim().toLowerCase().startsWith("!backupserver")) {
@@ -106,7 +152,7 @@ client.on("messageCreate", async (message) => {
       try {
         const guild = message.guild;
 
-        // 1. Roles
+        // 1. Snapshot Roles
         const roles = await guild.roles.fetch();
         const roleData = roles
           .filter((r) => r.id !== guild.id && !r.managed)
@@ -121,7 +167,7 @@ client.on("messageCreate", async (message) => {
             position: r.position
           }));
 
-        // 2. Categories & Channels
+        // 2. Snapshot Categories & Channels
         const channels = await guild.channels.fetch();
         const categories = channels.filter((c) => c && c.type === ChannelType.GuildCategory);
         const nonCategories = channels.filter((c) => c && c.type !== ChannelType.GuildCategory);
@@ -202,7 +248,7 @@ client.on("messageCreate", async (message) => {
         const attachment = new AttachmentBuilder(buffer, { name: "server-full-backup.json" });
 
         await statusMsg.edit({
-          content: `✅ **Clean Server Snapshot Complete!**\n• Roles: **${roleData.length}**\n• Channels & Categories: **${channelData.length}**\n• Clean Server Embeds: **${embedData.length}**\n\nSave this file. Run \`!restoreserver\` (or \`!restoreonlyembeds\`) with this file attached.`,
+          content: `✅ **Clean Server Snapshot Complete!**\n• Roles: **${roleData.length}**\n• Channels & Categories: **${channelData.length}**\n• Clean Server Embeds: **${embedData.length}**\n\nRun \`!restoreserver\` (or \`!restoreonlyembeds\`) with this file attached.`,
           files: [attachment]
         });
       } catch (err) {
@@ -213,7 +259,7 @@ client.on("messageCreate", async (message) => {
     }
 
     // ==========================================
-    // COMMAND: !restoreonlyembeds (Fast & Direct)
+    // COMMAND: !restoreonlyembeds (Direct Fast Mode)
     // ==========================================
     if (message.content.trim().toLowerCase().startsWith("!restoreonlyembeds")) {
       if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
@@ -223,7 +269,7 @@ client.on("messageCreate", async (message) => {
       const file = message.attachments.find((att) => att.name.endsWith(".json"));
       if (!file) return message.reply("❌ Please attach your backup JSON file with `!restoreonlyembeds`.");
 
-      const statusMsg = await message.reply("⏳ Fast-posting embeds directly to existing channels...");
+      const statusMsg = await message.reply("⏳ Fast-posting embeds directly into matching channels...");
       try {
         const response = await fetch(file.url);
         const snapshot = await response.json();
@@ -261,7 +307,7 @@ client.on("messageCreate", async (message) => {
     }
 
     // ==========================================
-    // COMMAND: !restoreserver (Full Rebuild)
+    // COMMAND: !restoreserver (Full Server Rebuild)
     // ==========================================
     if (message.content.trim().toLowerCase().startsWith("!restoreserver")) {
       if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
@@ -274,7 +320,7 @@ client.on("messageCreate", async (message) => {
       }
 
       console.log(`[RESTORE INITIATED] Downloading file: ${file.url}`);
-      const statusMsg = await message.reply("⏳ Reconstructing server structure (stall-proof mode)...");
+      const statusMsg = await message.reply("⏳ Reconstructing server structure (with Announcement channel fail-safe)...");
 
       try {
         const response = await fetch(file.url);
@@ -286,17 +332,17 @@ client.on("messageCreate", async (message) => {
         let createdChannels = 0;
         let restoredEmbeds = 0;
 
-        // Fetch once upfront to avoid rate limits
+        // Fetch once upfront to avoid Discord API gateway stalls
         const existingRoles = await guild.roles.fetch();
         const existingChannels = await guild.channels.fetch();
 
-        // 1. Roles
+        // 1. Restore Roles
         if (snapshot.roles && Array.isArray(snapshot.roles)) {
           for (const r of snapshot.roles) {
             try {
               const match = existingRoles.find((ex) => ex.name.toLowerCase() === r.name.toLowerCase());
               if (!match) {
-                console.log(`[RESTORE] Creating role: ${r.name}`);
+                console.log(`[RESTORE ROLE] Creating: ${r.name}`);
                 await guild.roles.create({
                   name: r.name,
                   color: r.color,
@@ -307,6 +353,8 @@ client.on("messageCreate", async (message) => {
                 });
                 createdRoles++;
                 await new Promise((res) => setTimeout(res, 400));
+              } else {
+                console.log(`[RESTORE ROLE] Skipping existing: ${r.name}`);
               }
             } catch (err) {
               console.error(`[ROLE ERROR] ${r.name}:`, err.message);
@@ -314,7 +362,7 @@ client.on("messageCreate", async (message) => {
           }
         }
 
-        // 2. Categories
+        // 2. Restore Categories
         const categoryMap = new Map();
         const categories = (snapshot.channels || []).filter((c) => c.type === ChannelType.GuildCategory);
         for (const cat of categories) {
@@ -323,7 +371,7 @@ client.on("messageCreate", async (message) => {
               (c) => c && c.type === ChannelType.GuildCategory && c.name.toLowerCase() === cat.name.toLowerCase()
             );
             if (!catObj) {
-              console.log(`[RESTORE] Creating category: ${cat.name}`);
+              console.log(`[RESTORE CATEGORY] Creating: ${cat.name}`);
               catObj = await guild.channels.create({
                 name: cat.name,
                 type: ChannelType.GuildCategory,
@@ -331,6 +379,8 @@ client.on("messageCreate", async (message) => {
               });
               createdChannels++;
               await new Promise((res) => setTimeout(res, 400));
+            } else {
+              console.log(`[RESTORE CATEGORY] Skipping existing: ${cat.name}`);
             }
             categoryMap.set(cat.name.toLowerCase(), catObj.id);
           } catch (err) {
@@ -338,35 +388,61 @@ client.on("messageCreate", async (message) => {
           }
         }
 
-        // 3. Channels
+        // 3. Restore Channels (Announcement Fallback Included)
         const normalChannels = (snapshot.channels || []).filter((c) => c.type !== ChannelType.GuildCategory);
         for (const ch of normalChannels) {
           try {
             let chObj = existingChannels.find(
-              (c) => c && c.type === ch.type && c.name.toLowerCase() === ch.name.toLowerCase()
+              (c) => c && c.name.toLowerCase() === ch.name.toLowerCase()
             );
             const parentId = ch.parentName ? categoryMap.get(ch.parentName.toLowerCase()) : null;
 
             if (!chObj) {
-              console.log(`[RESTORE] Creating channel: #${ch.name}`);
-              await guild.channels.create({
-                name: ch.name,
-                type: ch.type,
-                topic: ch.topic || undefined,
-                nsfw: ch.nsfw,
-                rateLimitPerUser: ch.rateLimitPerUser,
-                parent: parentId || undefined,
-                reason: "Restored from backup"
-              });
+              console.log(`[RESTORE CHANNEL] Creating #${ch.name}`);
+              let targetType = ch.type;
+
+              try {
+                await guild.channels.create({
+                  name: ch.name,
+                  type: targetType,
+                  topic: ch.topic || undefined,
+                  nsfw: ch.nsfw,
+                  rateLimitPerUser: ch.rateLimitPerUser,
+                  parent: parentId || undefined,
+                  reason: "Restored from backup"
+                });
+              } catch (createErr) {
+                // If Announcement channel fails (server lacks Community feature), fallback to Text Channel
+                if (targetType === ChannelType.GuildAnnouncement) {
+                  console.warn(`[WARN] Could not create Announcement channel #${ch.name}. Falling back to normal Text channel...`);
+                  await guild.channels.create({
+                    name: ch.name,
+                    type: ChannelType.GuildText,
+                    topic: ch.topic || undefined,
+                    nsfw: ch.nsfw,
+                    rateLimitPerUser: ch.rateLimitPerUser,
+                    parent: parentId || undefined,
+                    reason: "Restored from backup (Fallback to GuildText)"
+                  });
+                } else {
+                  throw createErr;
+                }
+              }
+
               createdChannels++;
               await new Promise((res) => setTimeout(res, 400));
+            } else {
+              console.log(`[RESTORE CHANNEL] Skipping existing: #${ch.name}`);
+              if (parentId && chObj.parentId !== parentId) {
+                await chObj.setParent(parentId).catch(() => {});
+              }
             }
           } catch (err) {
             console.error(`[CH ERROR] #${ch.name}:`, err.message);
           }
         }
 
-        // 4. Custom Embeds
+        // 4. Restore Custom Embeds
         const updatedChannels = await guild.channels.fetch();
         if (snapshot.embeds && Array.isArray(snapshot.embeds)) {
           for (const item of snapshot.embeds) {
