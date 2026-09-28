@@ -48,6 +48,11 @@ let lastPingTime = 0;
 const botDeletedMessageIds = new Set();
 const messageCache = new Map();
 
+// Custom mention auto-reply storage: Map<userId, customMessage>
+const userCustomReplies = new Map();
+// Spam cooldown map for mention replies: Map<"userId-channelId", timestamp>
+const replyCooldowns = new Map();
+
 client.on("clientReady", async () => {
   console.log(`[BOT READY] Logged in as ${client.user.tag}`);
 
@@ -100,6 +105,41 @@ function withTimeout(promise, ms = 4000) {
 client.on("messageCreate", async (message) => {
   try {
     if (!message.guild) return;
+
+    // ==========================================
+    // COMMAND: .setafk <message>
+    // ==========================================
+    if (message.content.trim().toLowerCase().startsWith(".setafk")) {
+      const text = message.content.slice(7).trim();
+      if (!text) {
+        return message.reply("❌ Please provide the message you want the bot to reply with.\n*Example:* `.setafk Currently AFK, drop a DM if urgent!`");
+      }
+      userCustomReplies.set(message.author.id, text);
+      const reply = await message.reply("✅ Your custom mention message has been updated! The bot will now reply with your embed whenever you are tagged.");
+      setTimeout(() => reply.delete().catch(() => {}), 5000);
+      return;
+    }
+
+    // ==========================================
+    // COMMAND: .clearafk
+    // ==========================================
+    if (message.content.trim().toLowerCase() === ".clearafk") {
+      userCustomReplies.delete(message.author.id);
+      const reply = await message.reply("🗑️ Your custom mention auto-response has been cleared.");
+      setTimeout(() => reply.delete().catch(() => {}), 5000);
+      return;
+    }
+
+    // ==========================================
+    // COMMAND: .showafk
+    // ==========================================
+    if (message.content.trim().toLowerCase() === ".showafk") {
+      const current = userCustomReplies.get(message.author.id);
+      if (!current) {
+        return message.reply("ℹ️ You do not have an active custom mention message set. Use `.setafk <message>` to set one.");
+      }
+      return message.reply(`📌 **Your current mention message:**\n> ${current}`);
+    }
 
     // ==========================================
     // COMMAND: .purge <amount>
@@ -156,7 +196,6 @@ client.on("messageCreate", async (message) => {
       try {
         const guild = message.guild;
 
-        // 1. Roles
         const roles = await guild.roles.fetch();
         const roleData = roles
           .filter((r) => !r.managed)
@@ -172,7 +211,6 @@ client.on("messageCreate", async (message) => {
             isEveryone: r.id === guild.id
           }));
 
-        // 2. Categories & Channels (with permission overwrites)
         const channels = await guild.channels.fetch();
         const categories = channels.filter((c) => c && c.type === ChannelType.GuildCategory);
         const nonCategories = channels.filter((c) => c && c.type !== ChannelType.GuildCategory);
@@ -186,7 +224,7 @@ client.on("messageCreate", async (message) => {
             overwrites.push({
               name: targetRole ? targetRole.name : null,
               isEveryone: ov.id === guild.id,
-              type: ov.type, // 0 for role, 1 for member
+              type: ov.type,
               allow: ov.allow.bitfield.toString(),
               deny: ov.deny.bitfield.toString()
             });
@@ -218,7 +256,6 @@ client.on("messageCreate", async (message) => {
           });
         }
 
-        // 3. Custom Embeds
         const embedData = [];
         let channelsToScan = [];
 
@@ -329,7 +366,7 @@ client.on("messageCreate", async (message) => {
     }
 
     // ==========================================
-    // COMMAND: !restoreserver (Updates & Syncs Permissions)
+    // COMMAND: !restoreserver (Default: SKIPS EMBEDS)
     // Add "--embeds" to restore embeds as well
     // ==========================================
     if (message.content.trim().toLowerCase().startsWith("!restoreserver")) {
@@ -367,7 +404,7 @@ client.on("messageCreate", async (message) => {
         let existingRoles = await guild.roles.fetch();
         let existingChannels = await guild.channels.fetch();
 
-        // 1. Restore & Update Roles and their Permissions
+        // 1. Restore & Update Roles
         if (snapshot.roles && Array.isArray(snapshot.roles)) {
           for (const r of snapshot.roles) {
             try {
@@ -391,8 +428,6 @@ client.on("messageCreate", async (message) => {
                 createdRoles++;
                 await new Promise((res) => setTimeout(res, 350));
               } else if (match) {
-                // UPDATE PERMISSIONS ON EXISTING ROLE
-                console.log(`[RESTORE ROLE] Syncing permissions for existing role: ${match.name}`);
                 if (guild.members.me.roles.highest.position > match.position) {
                   await withTimeout(
                     match.setPermissions(BigInt(r.permissions), "Synced permissions from backup"),
@@ -407,10 +442,8 @@ client.on("messageCreate", async (message) => {
           }
         }
 
-        // Refresh roles to map permission overwrites cleanly
         existingRoles = await guild.roles.fetch();
 
-        // Helper to reconstruct channel permission overwrites
         function buildOverwrites(rawOverwrites) {
           if (!rawOverwrites || !Array.isArray(rawOverwrites)) return [];
           const overwrites = [];
@@ -459,7 +492,6 @@ client.on("messageCreate", async (message) => {
               createdChannels++;
               await new Promise((res) => setTimeout(res, 350));
             } else {
-              console.log(`[RESTORE CATEGORY] Syncing permissions for existing category: ${cat.name}`);
               if (overwrites.length > 0) {
                 await withTimeout(catObj.permissionOverwrites.set(overwrites), 3500).catch(() => {});
                 updatedChannels++;
@@ -502,7 +534,6 @@ client.on("messageCreate", async (message) => {
               createdChannels++;
               await new Promise((res) => setTimeout(res, 350));
             } else {
-              console.log(`[RESTORE CHANNEL] Updating existing channel #${ch.name}`);
               if (parentId && chObj.parentId !== parentId) {
                 await chObj.setParent(parentId).catch(() => {});
               }
@@ -547,6 +578,51 @@ client.on("messageCreate", async (message) => {
         await statusMsg.edit(`❌ Critical error: ${err.message}`);
       }
       return;
+    }
+
+    // ==========================================
+    // AUTO-REPLY CUSTOM EMBED ON MENTION (15s Auto-Delete)
+    // ==========================================
+    if (!message.author.bot && message.mentions.users.size > 0) {
+      for (const [userId, user] of message.mentions.users) {
+        if (userId === message.author.id) continue; // Don't trigger if user mentions themselves
+
+        const customText = userCustomReplies.get(userId);
+        if (!customText) continue;
+
+        const cooldownKey = `${userId}-${message.channel.id}`;
+        const lastSent = replyCooldowns.get(cooldownKey) || 0;
+        const nowTime = Date.now();
+
+        // 15-second cooldown per channel so it cannot be spammed
+        if (nowTime - lastSent < 15000) continue;
+        replyCooldowns.set(cooldownKey, nowTime);
+
+        const member = await message.guild.members.fetch(userId).catch(() => null);
+        const displayName = member ? member.displayName : user.username;
+        const avatarUrl = user.displayAvatarURL({ dynamic: true });
+
+        const customEmbed = new EmbedBuilder()
+          .setColor(0x5865F2)
+          .setAuthor({ name: `${displayName}'s Status`, iconURL: avatarUrl })
+          .setDescription(customText)
+          .setFooter({ text: "This message will self-delete in 15 seconds." })
+          .setTimestamp();
+
+        try {
+          const autoMsg = await message.reply({ embeds: [customEmbed] });
+
+          // Self-delete after 15 seconds & protect from ghost-ping detector
+          setTimeout(async () => {
+            botDeletedMessageIds.add(autoMsg.id);
+            messageCache.delete(autoMsg.id);
+            setTimeout(() => botDeletedMessageIds.delete(autoMsg.id), 30000);
+            await autoMsg.delete().catch(() => {});
+          }, 15000);
+        } catch (e) {
+          console.error("Failed to send auto-reply embed:", e.message);
+        }
+      }
     }
 
     // ==========================================
