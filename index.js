@@ -17,6 +17,15 @@ const COOLDOWN = 60 * 60 * 1000; // 1 hour in ms
 // Dedicated Channel ID for #ping-logs
 const LOG_CHANNEL_ID = "1554030875585421342";
 
+// Bots to IGNORE completely during embed backups (OwO, Pokétwo, Mudae, Dank Memer, etc.)
+const IGNORED_BOT_IDS = [
+  "408785106942164992", // OwO Bot
+  "854227910977716234", // OwO secondary ID
+  "270904126974590976", // Dank Memer
+  "664588538202423307", // Pokétwo
+  "432610292342587392"  // Mudae
+];
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -93,13 +102,14 @@ client.on("messageCreate", async (message) => {
   try {
     if (!message.guild) return;
 
-    // --- Command: !backupserver (Full Server Architecture + Clean Embeds) ---
+    // --- Command: !backupserver (Full Server Architecture + Clean Filtered Embeds) ---
+    // You can do: `!backupserver` OR specify channels like: `!backupserver #rules #announcements #info`
     if (message.content.trim().toLowerCase().startsWith("!backupserver")) {
       if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
         return message.reply("❌ Only administrators can run this command.");
       }
 
-      const statusMsg = await message.reply("⏳ Creating clean server snapshot...");
+      const statusMsg = await message.reply("⏳ Creating clean server snapshot (excluding bot spam & OwO)...");
 
       try {
         const guild = message.guild;
@@ -150,17 +160,20 @@ client.on("messageCreate", async (message) => {
           });
         }
 
-        // 3. Snapshot ONLY Bot/Webhook Custom Embeds
+        // 3. Snapshot Embeds: Filter out OwO, link previews, spam bots
         const embedData = [];
         let channelsToScan = [];
 
         if (message.mentions.channels.size > 0) {
           channelsToScan = Array.from(message.mentions.channels.values());
         } else {
+          // If no channels mentioned, ignore known chatter/spam channels automatically
           channelsToScan = Array.from(
-            channels.filter(
-              (c) => c && (c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement)
-            ).values()
+            channels.filter((c) => {
+              if (!c || (c.type !== ChannelType.GuildText && c.type !== ChannelType.GuildAnnouncement)) return false;
+              const name = c.name.toLowerCase();
+              return !name.includes("spam") && !name.includes("bot") && !name.includes("owo") && !name.includes("chat");
+            }).values()
           );
         }
 
@@ -168,7 +181,11 @@ client.on("messageCreate", async (message) => {
           try {
             const msgs = await ch.messages.fetch({ limit: 100 });
             msgs.forEach((m) => {
-              // STRICT FILTER: Only back up messages posted by bots or webhooks
+              // Exclude OwO and other game bots
+              if (IGNORED_BOT_IDS.includes(m.author.id)) return;
+              if (m.author.username && m.author.username.toLowerCase().includes("owo")) return;
+
+              // Only accept embeds created by server bots or webhooks
               if ((m.author.bot || m.webhookId) && m.embeds && m.embeds.length > 0) {
                 const richEmbeds = m.embeds.filter(
                   (e) => (e.title || e.description || e.fields?.length) && !e.url?.includes("tenor.com")
@@ -198,7 +215,7 @@ client.on("messageCreate", async (message) => {
         const attachment = new AttachmentBuilder(buffer, { name: "server-full-backup.json" });
 
         await statusMsg.edit({
-          content: `✅ **Full Server Snapshot Complete!**\n• Roles: **${roleData.length}**\n• Channels & Categories: **${channelData.length}**\n• Verified Bot/Webhook Embeds: **${embedData.length}**\n\nRun \`!restoreserver\` with this attached file whenever you need to restore.`,
+          content: `✅ **Clean Server Snapshot Complete!**\n• Roles: **${roleData.length}**\n• Channels & Categories: **${channelData.length}**\n• Clean Server Embeds: **${embedData.length}**\n\n(All OwO / bot spam embeds and chatting channels excluded). Keep this file safe!`,
           files: [attachment]
         });
       } catch (err) {
