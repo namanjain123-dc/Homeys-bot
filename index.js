@@ -45,7 +45,7 @@ const client = new Client({
 });
 
 let lastPingTime = 0;
-let homeysProtectionEnabled = true; // Toggle flag for the @homeys cooldown/ban system
+let homeysProtectionEnabled = true;
 const botDeletedMessageIds = new Set();
 const messageCache = new Map();
 
@@ -53,6 +53,9 @@ const messageCache = new Map();
 const userCustomReplies = new Map();
 // Spam cooldown map for mention replies: Map<"userId-channelId", timestamp>
 const replyCooldowns = new Map();
+
+// Lurk tracker: Set<userId>
+const lurkingUsers = new Set();
 
 client.on("clientReady", async () => {
   console.log(`[BOT READY] Logged in as ${client.user.tag}`);
@@ -107,6 +110,37 @@ client.on("messageCreate", async (message) => {
   try {
     if (!message.guild) return;
 
+    // Check if a lurking user broke their lurk by typing a normal message
+    if (!message.author.bot && lurkingUsers.has(message.author.id) && !message.content.trim().startsWith(",")) {
+      lurkingUsers.delete(message.author.id);
+      message.channel.send(`👀 **${message.member ? message.member.displayName : message.author.username}** emerged from the shadows and unlurked!`).catch(() => {});
+    }
+
+    // ==========================================
+    // COMMAND: ,lurk
+    // ==========================================
+    if (message.content.trim().toLowerCase() === ",lurk") {
+      lurkingUsers.add(message.author.id);
+      const name = message.member ? message.member.displayName : message.author.username;
+      await message.channel.send(`🥷 **${name}** faded into the shadows and is now lurking... *(Speak again to unlurk)*`);
+      return;
+    }
+
+    // ==========================================
+    // COMMAND: ,ragequit
+    // ==========================================
+    if (message.content.trim().toLowerCase() === ",ragequit") {
+      const name = message.member ? message.member.displayName : message.author.username;
+      const rageMessages = [
+        `💥 (╯°□°)╯︵ ┻━┻ **${name}** slammed their keyboard, uninstalled Discord, and ragequit the chat!`,
+        `🚪🏃💨 **${name}** couldn't take this bullshit anymore and threw their setup out the window!`,
+        `🤬 **${name}** disconnected in pure, unadulterated fury. RIP monitor.`
+      ];
+      const randomMsg = rageMessages[Math.floor(Math.random() * rageMessages.length)];
+      await message.channel.send(randomMsg);
+      return;
+    }
+
     // ==========================================
     // COMMAND: ,togglehomeys / ,homeystoggle
     // ==========================================
@@ -143,7 +177,7 @@ client.on("messageCreate", async (message) => {
     if (message.content.trim().toLowerCase().startsWith(",setafk")) {
       const text = message.content.slice(7).trim();
       if (!text) {
-        return message.reply("❌ Please provide the message you want the bot to reply with.\n*Example:* `,setafk The fuck did you ping me for?`");
+        return message.reply("❌ Please provide the message you want the bot to reply with.\n*Example:* `,setafk Busy right now, don't disturb.`");
       }
       userCustomReplies.set(message.author.id, text);
       const reply = await message.reply("✅ Your custom mention message has been updated!");
@@ -691,7 +725,6 @@ client.on("messageCreate", async (message) => {
 
     if (!hasRolePing) return;
 
-    // If disabled via command, ignore cooldown checks and bans entirely
     if (!homeysProtectionEnabled) {
       return;
     }
